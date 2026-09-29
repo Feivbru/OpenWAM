@@ -213,7 +213,13 @@ def warn_live_model_cfg_ignored(ckpt_cfg: DictConfig, cfg: DictConfig, ckpt_dir:
         print(line, flush=True)
 
 
-def build_architecture_from_ckpt_dir(ckpt_dir: str, *, weights_required: bool, override_cfg: DictConfig = None):
+def build_architecture_from_ckpt_dir(
+    ckpt_dir: str,
+    *,
+    weights_required: bool,
+    override_cfg: DictConfig = None,
+    skip_text_encoder: bool = False,
+):
     """Build the architecture from a self-contained checkpoint source.
 
     Skeletons come from the resolved model config's
@@ -232,6 +238,11 @@ def build_architecture_from_ckpt_dir(ckpt_dir: str, *, weights_required: bool, o
     merged result — written back into ``override_cfg.model`` — is what the
     architecture is built from. When omitted the ckpt's ``model`` section is used
     verbatim (resume, and standalone callers).
+
+    ``skip_text_encoder`` skips instantiating UMT5 (and its tokenizer) when the
+    run feeds offline T5 embeds (``dataloader.use_t5_cache``). Applied only to
+    the in-memory build — it is **not** written into ``cfg.model``, so saved
+    ``config.yaml`` still carries component specs for deploy that needs T5.
 
     Returns ``(resolved_arch, architecture, ckpt_cfg)``.
     """
@@ -267,7 +278,19 @@ def build_architecture_from_ckpt_dir(ckpt_dir: str, *, weights_required: bool, o
     # from, not from ckpt_cfg directly — otherwise a live override of a
     # video_backbone key (shift_video, from_scratch, ...) would reach the
     # architecture but not the backbone build that reads it back off ``_source``.
-    vb_params["_source"] = OmegaConf.to_container(model_cfg.video_backbone, resolve=True)
+    vb_source = OmegaConf.to_container(model_cfg.video_backbone, resolve=True)
+    if not isinstance(vb_source, dict):
+        vb_source = {}
+    if skip_text_encoder:
+        # Runtime-only: do not mutate cfg.model / saved config.yaml.
+        vb_source = dict(vb_source)
+        vb_source["skip_text_encoder"] = True
+        logger.info(
+            "[%s] skip_text_encoder=true (UMT5 + tokenizer not instantiated; "
+            "use with dataloader.use_t5_cache)",
+            tag,
+        )
+    vb_params["_source"] = vb_source
     vb_params["_ckpt_dir"] = ckpt_dir
     # Finetune loads safetensors a few lines below, so a backbone may leave an
     # empty shell for that load to fill. Resume must not: `load_state` runs only
@@ -278,6 +301,8 @@ def build_architecture_from_ckpt_dir(ckpt_dir: str, *, weights_required: bool, o
 
     logger.info("[%s] building architecture from self-contained ckpt dir: %s", tag, ckpt_dir)
     architecture = build_architecture(resolved_arch.registry_name, params)
+    if skip_text_encoder:
+        architecture._ignore_text_encoder_keys = True
 
     if weights_required:
         weights = explicit_weights or find_latest_weights(ckpt_dir)

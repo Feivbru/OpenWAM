@@ -1,0 +1,536 @@
+{
+  "generated_at": "2026-09-27T18:14:41",
+  "old_logdir": "/data/zixian_guo/projects/haoming/project/PI/OpenWAM/logs/batched_eval_fpd_full_colocate_6_demo_clean+demo_randomized_20260925_122013",
+  "new_logdir": "/data/zixian_guo/projects/haoming/project/PI/OpenWAM/logs/batched_eval_fpd_colocate6_norender_demo_clean+demo_randomized_20260926_160915",
+  "skip_file": "/data/zixian_guo/projects/haoming/project/PI/OpenWAM/logs/fpd_colocate6_skip_done.txt",
+  "by_mode_done_only": {
+    "demo_clean": {
+      "success": 4709,
+      "total": 5000,
+      "rate_pct": 94.18,
+      "tasks_done": 50,
+      "tasks_partial": 0
+    },
+    "demo_randomized": {
+      "success": 1602,
+      "total": 1700,
+      "rate_pct": 94.24,
+      "tasks_done": 17,
+      "tasks_partial": 6
+    }
+  },
+  "macro_avg_done_tasks_pct": 94.19,
+  "tasks": {
+    "demo_clean:adjust_bottle": {
+      "success": 100,
+      "total": 100,
+      "rate_pct": 100.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:beat_block_hammer": {
+      "success": 100,
+      "total": 100,
+      "rate_pct": 100.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:blocks_ranking_rgb": {
+      "success": 100,
+      "total": 100,
+      "rate_pct": 100.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:blocks_ranking_size": {
+      "success": 81,
+      "total": 100,
+      "rate_pct": 81.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:click_alarmclock": {
+      "success": 95,
+      "total": 100,
+      "rate_pct": 95.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:click_bell": {
+      "success": 100,
+      "total": 100,
+      "rate_pct": 100.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:dump_bin_bigbin": {
+      "success": 97,
+      "total": 100,
+      "rate_pct": 97.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:grab_roller": {
+      "success": 100,
+      "total": 100,
+      "rate_pct": 100.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:handover_block": {
+      "success": 99,
+      "total": 100,
+      "rate_pct": 99.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:handover_mic": {
+      "success": 91,
+      "total": 100,
+      "rate_pct": 91.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:hanging_mug": {
+      "success": 49,
+      "total": 100,
+      "rate_pct": 49.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:lift_pot": {
+      "success": 100,
+      "total": 100,
+      "rate_pct": 100.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:move_can_pot": {
+      "success": 100,
+      "total": 100,
+      "rate_pct": 100.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:move_pillbottle_pad": {
+      "success": 98,
+      "total": 100,
+      "rate_pct": 98.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:move_playingcard_away": {
+      "success": 100,
+      "total": 100,
+      "rate_pct": 100.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:move_stapler_pad": {
+      "success": 97,
+      "total": 100,
+      "rate_pct": 97.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:open_laptop": {
+      "success": 99,
+      "total": 100,
+      "rate_pct": 99.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:open_microwave": {
+      "success": 94,
+      "total": 100,
+      "rate_pct": 94.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:pick_diverse_bottles": {
+      "success": 82,
+      "total": 100,
+      "rate_pct": 82.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:pick_dual_bottles": {
+      "success": 96,
+      "total": 100,
+      "rate_pct": 96.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:place_a2b_left": {
+      "success": 99,
+      "total": 100,
+      "rate_pct": 99.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:place_a2b_right": {
+      "success": 98,
+      "total": 100,
+      "rate_pct": 98.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:place_bread_basket": {
+      "success": 92,
+      "total": 100,
+      "rate_pct": 92.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:place_bread_skillet": {
+      "success": 94,
+      "total": 100,
+      "rate_pct": 94.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:place_burger_fries": {
+      "success": 97,
+      "total": 100,
+      "rate_pct": 97.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:place_can_basket": {
+      "success": 82,
+      "total": 100,
+      "rate_pct": 82.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:place_cans_plasticbox": {
+      "success": 99,
+      "total": 100,
+      "rate_pct": 99.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:place_container_plate": {
+      "success": 98,
+      "total": 100,
+      "rate_pct": 98.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:place_dual_shoes": {
+      "success": 95,
+      "total": 100,
+      "rate_pct": 95.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:place_empty_cup": {
+      "success": 100,
+      "total": 100,
+      "rate_pct": 100.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:place_fan": {
+      "success": 96,
+      "total": 100,
+      "rate_pct": 96.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:place_mouse_pad": {
+      "success": 99,
+      "total": 100,
+      "rate_pct": 99.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:place_object_basket": {
+      "success": 92,
+      "total": 100,
+      "rate_pct": 92.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:place_object_scale": {
+      "success": 98,
+      "total": 100,
+      "rate_pct": 98.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:place_object_stand": {
+      "success": 98,
+      "total": 100,
+      "rate_pct": 98.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:place_phone_stand": {
+      "success": 89,
+      "total": 100,
+      "rate_pct": 89.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:place_shoe": {
+      "success": 99,
+      "total": 100,
+      "rate_pct": 99.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:press_stapler": {
+      "success": 94,
+      "total": 100,
+      "rate_pct": 94.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:put_bottles_dustbin": {
+      "success": 91,
+      "total": 100,
+      "rate_pct": 91.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_clean:put_object_cabinet": {
+      "success": 89,
+      "total": 100,
+      "rate_pct": 89.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_clean:rotate_qrcode": {
+      "success": 94,
+      "total": 100,
+      "rate_pct": 94.0,
+      "done": true,
+      "source": "skip/old_colocate6"
+    },
+    "demo_clean:scan_object": {
+      "success": 95,
+      "total": 100,
+      "rate_pct": 95.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_clean:shake_bottle": {
+      "success": 100,
+      "total": 100,
+      "rate_pct": 100.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_clean:shake_bottle_horizontally": {
+      "success": 100,
+      "total": 100,
+      "rate_pct": 100.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_clean:stack_blocks_three": {
+      "success": 97,
+      "total": 100,
+      "rate_pct": 97.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_clean:stack_blocks_two": {
+      "success": 100,
+      "total": 100,
+      "rate_pct": 100.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_clean:stack_bowls_three": {
+      "success": 84,
+      "total": 100,
+      "rate_pct": 84.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_clean:stack_bowls_two": {
+      "success": 99,
+      "total": 100,
+      "rate_pct": 99.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_clean:stamp_seal": {
+      "success": 96,
+      "total": 100,
+      "rate_pct": 96.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_clean:turn_switch": {
+      "success": 67,
+      "total": 100,
+      "rate_pct": 67.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_randomized:adjust_bottle": {
+      "success": 99,
+      "total": 100,
+      "rate_pct": 99.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_randomized:beat_block_hammer": {
+      "success": 97,
+      "total": 100,
+      "rate_pct": 97.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_randomized:blocks_ranking_rgb": {
+      "success": 98,
+      "total": 100,
+      "rate_pct": 98.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_randomized:blocks_ranking_size": {
+      "success": 79,
+      "total": 100,
+      "rate_pct": 79.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_randomized:click_alarmclock": {
+      "success": 99,
+      "total": 100,
+      "rate_pct": 99.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_randomized:click_bell": {
+      "success": 100,
+      "total": 100,
+      "rate_pct": 100.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_randomized:dump_bin_bigbin": {
+      "success": 95,
+      "total": 100,
+      "rate_pct": 95.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_randomized:grab_roller": {
+      "success": 99,
+      "total": 100,
+      "rate_pct": 99.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_randomized:handover_block": {
+      "success": 94,
+      "total": 100,
+      "rate_pct": 94.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_randomized:handover_mic": {
+      "success": 94,
+      "total": 100,
+      "rate_pct": 94.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_randomized:hanging_mug": {
+      "success": 55,
+      "total": 100,
+      "rate_pct": 55.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_randomized:lift_pot": {
+      "success": 100,
+      "total": 100,
+      "rate_pct": 100.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_randomized:move_can_pot": {
+      "success": 99,
+      "total": 100,
+      "rate_pct": 99.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_randomized:move_pillbottle_pad": {
+      "success": 99,
+      "total": 100,
+      "rate_pct": 99.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_randomized:move_playingcard_away": {
+      "success": 100,
+      "total": 100,
+      "rate_pct": 100.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_randomized:move_stapler_pad": {
+      "success": 96,
+      "total": 100,
+      "rate_pct": 96.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_randomized:open_laptop": {
+      "success": 99,
+      "total": 100,
+      "rate_pct": 99.0,
+      "done": true,
+      "source": "norender"
+    },
+    "demo_randomized:open_microwave": {
+      "success": 50,
+      "total": 60,
+      "rate_pct": 83.33,
+      "done": false,
+      "source": "norender"
+    },
+    "demo_randomized:pick_diverse_bottles": {
+      "success": 59,
+      "total": 67,
+      "rate_pct": 88.06,
+      "done": false,
+      "source": "norender"
+    },
+    "demo_randomized:pick_dual_bottles": {
+      "success": 65,
+      "total": 67,
+      "rate_pct": 97.01,
+      "done": false,
+      "source": "norender"
+    },
+    "demo_randomized:place_a2b_left": {
+      "success": 46,
+      "total": 47,
+      "rate_pct": 97.87,
+      "done": false,
+      "source": "norender"
+    },
+    "demo_randomized:place_a2b_right": {
+      "success": 41,
+      "total": 42,
+      "rate_pct": 97.62,
+      "done": false,
+      "source": "norender"
+    },
+    "demo_randomized:place_bread_basket": {
+      "success": 23,
+      "total": 23,
+      "rate_pct": 100.0,
+      "done": false,
+      "source": "norender"
+    }
+  }
+}

@@ -1,0 +1,27 @@
+# In-process OpenWAM RoboTwin policy (FastWAM-style local eval).
+policy_name: openwam_local_policy
+task_name: null
+task_config: demo_clean
+ckpt_setting: null
+# Absolute checkpoint directory (config.yaml + checkpoint_step_*.safetensors).
+ckpt_dir: null
+seed: 0
+instruction_type: unseen
+eval_num_episodes: 100
+
+# Deploy yaml merged on top of the training checkpoint config.
+deploy_config: null
+device: cuda
+
+# Must match training action_mode=eef for OpenWAM FPD.
+action_type: ee
+send_state: true
+state_dim: 20
+
+# FPD checkpoints usually omit UMT5 weights; load DiT without T5 and encode on CPU.
+skip_text_encoder: true
+skip_get_obs_within_replan: true
+eval_video_log: false
+
+# Filled by eval_robotwin_single for manager result layout.
+eval_output_dir: null

@@ -101,6 +101,7 @@ class OpenWAMTrainer:
         if finetune_path and resume_path:
             raise ValueError("finetune_ckpt_path and resume_ckpt_path are mutually exclusive; set at most one.")
         self._ckpt_source_dir = finetune_path or resume_path
+        use_t5_cache = bool(getattr(getattr(cfg, "dataloader", None), "use_t5_cache", False))
         if self._ckpt_source_dir is not None:
             from openwam.train.utils.ckpt_model_loader import (
                 build_architecture_from_ckpt_dir,
@@ -115,10 +116,13 @@ class OpenWAMTrainer:
             # the new run dir are the same one. Resume continues ONE run whose
             # config.yaml is already on disk and is reused untouched, so there the
             # ckpt config stays authoritative and divergence is only reported.
+            # use_t5_cache → skip UMT5 construction (disk embeds); not written into
+            # saved config.yaml so deploy can still build T5 from component specs.
             resolved_arch, self.architecture, ckpt_cfg = build_architecture_from_ckpt_dir(
                 self._ckpt_source_dir,
                 weights_required=finetune_path is not None,
                 override_cfg=cfg if finetune_path is not None else None,
+                skip_text_encoder=use_t5_cache,
             )
             if finetune_path is not None:
                 # The merge replaced the cfg.model node, so `m` (bound above)
@@ -147,6 +151,10 @@ class OpenWAMTrainer:
         # --- Freeze: declared per-architecture in the model yaml (freeze:);
         # freeze_modules silently skips paths absent on a given architecture.
         freeze_list = list(getattr(m, "freeze", []))
+        # Single extra knob: freeze video DiT (default false). In FPD mode this
+        # only applies to the student; the teacher is fully frozen separately.
+        if bool(getattr(m, "freeze_video_dit", False)):
+            freeze_list.append("video_backbone.dit")
         for name in self.architecture.freeze_modules(freeze_list):
             logger.info("Frozen: %s", name)
 
@@ -156,6 +164,32 @@ class OpenWAMTrainer:
         # Loss weights from the training config
         self.lambda_video = float(t.lambda_video)
         self.lambda_action = float(t.lambda_action)
+        self.lambda_distill = float(getattr(t, "lambda_distill", 0.0) or 0.0)
+        self.use_distill_gate = bool(getattr(t, "use_distill_gate", False))
+        # ``clean`` = FastWAM-VLA-style teacher pretrain: GT video at σ≈0 endpoint,
+        # action FM only (pair with lambda_video=0). Default ``train`` = noisy video.
+        self.video_mode = str(getattr(t, "video_mode", "train") or "train")
+        if self.video_mode not in ("train", "clean"):
+            raise ValueError(f"training.video_mode must be 'train' or 'clean', got {self.video_mode!r}")
+
+        # Optional FPD: build a frozen teacher (not registered on self.architecture).
+        self.fpd = None
+        fpd_cfg = getattr(cfg, "fpd", None)
+        self._fpd_enabled = bool(getattr(fpd_cfg, "enabled", False)) if fpd_cfg is not None else False
+        if self._fpd_enabled:
+            if self.video_mode == "clean":
+                raise ValueError(
+                    "fpd.enabled=true is incompatible with training.video_mode=clean "
+                    "(clean mode is for teacher pretrain only; FPD student uses noisy video)."
+                )
+            self._setup_fpd(fpd_cfg)
+        elif self.video_mode == "clean":
+            logger.info(
+                "Teacher-pretrain mode: video_mode=clean (σ≈0 GT video), "
+                "lambda_video=%.4g lambda_action=%.4g",
+                self.lambda_video,
+                self.lambda_action,
+            )
 
         # Push forward-time training flags onto the architecture so prepare_inputs
         # is self-contained.
@@ -169,6 +203,18 @@ class OpenWAMTrainer:
         self.model = self  # self-reference some external callers expect
 
         is_main = self.accelerator is None or self.accelerator.is_main_process
+        if is_main:
+            mot_ckpt = None
+            driver = getattr(self.architecture, "_mot_driver", None)
+            if driver is not None:
+                mot_ckpt = getattr(driver, "mot_checkpoint_mixed_attn", None)
+            logger.info(
+                "[mem-cfg] use_gradient_checkpointing=%s mot_checkpoint_mixed_attn=%s "
+                "zero_stage=%s (FastWAM robotwin: both ckpt flags false)",
+                bool(t.use_gradient_checkpointing),
+                mot_ckpt,
+                getattr(t, "zero_stage", None),
+            )
         log_parameter_counts(self.architecture, is_main=is_main)
 
     # (2) Driver — build optimizer/dataloader/scheduler -> setup dir -> accelerate prepare
@@ -321,6 +367,25 @@ class OpenWAMTrainer:
                 with self.accelerator.accumulate(self.architecture):
                     losses = self.compute_loss(batch)
                     loss = losses["total"]
+                    if not torch.isfinite(loss).all():
+                        # Distinguish "bad batch / forward" vs "weights already poisoned".
+                        bad_params = 0
+                        bad_names: list[str] = []
+                        try:
+                            arch = self.accelerator.unwrap_model(self.architecture)
+                            for name, p in arch.named_parameters():
+                                if p.requires_grad and p.numel() and not torch.isfinite(p).all():
+                                    bad_params += 1
+                                    if len(bad_names) < 8:
+                                        bad_names.append(name)
+                        except Exception:
+                            bad_params = -1
+                        raise RuntimeError(
+                            f"non-finite loss at step={global_step} epoch={epoch}: "
+                            f"total={loss.detach()} video={losses.get('video')} "
+                            f"action={losses.get('action')} bad_trainable_params={bad_params} "
+                            f"bad_names={bad_names}"
+                        )
                     self.accelerator.backward(loss)
 
                     grad_norm = torch.tensor(0.0, device=loss.device)
@@ -331,10 +396,43 @@ class OpenWAMTrainer:
                         optimizer.step()
                         if scheduler is not None:
                             scheduler.step()
-                        optimizer.zero_grad()
+                        optimizer.zero_grad(set_to_none=True)
                         opt_step += 1
 
                 global_step += 1
+
+                if is_main and torch.cuda.is_available() and global_step % 10 == 0:
+                    alloc = torch.cuda.memory_allocated() / (1024**3)
+                    reserved = torch.cuda.memory_reserved() / (1024**3)
+                    avg_gib = 0.0
+                    ipg_gib = 0.0
+                    try:
+                        wrapped = getattr(self.accelerator, "deepspeed_engine_wrapped", None)
+                        ds_opt = getattr(getattr(wrapped, "engine", None), "optimizer", None)
+                        if ds_opt is not None:
+                            for lst in getattr(ds_opt, "averaged_gradients", {}).values() or ():
+                                if not lst:
+                                    continue
+                                for t_ in lst:
+                                    if t_ is not None and hasattr(t_, "numel"):
+                                        avg_gib += t_.numel() * t_.element_size()
+                            avg_gib /= 1024**3
+                            for bucket in getattr(ds_opt, "ipg_buckets", {}).values() or ():
+                                for g in getattr(bucket, "grads", []) or []:
+                                    if g is not None and hasattr(g, "numel"):
+                                        ipg_gib += g.numel() * g.element_size()
+                            ipg_gib /= 1024**3
+                    except Exception:
+                        pass
+                    logger.info(
+                        "[mem] step=%d allocated=%.2fGiB reserved=%.2fGiB "
+                        "ds_avg_grads=%.2fGiB ds_ipg=%.2fGiB",
+                        global_step,
+                        alloc,
+                        reserved,
+                        avg_gib,
+                        ipg_gib,
+                    )
 
                 metrics = reduce_step_metrics(self.accelerator, losses, grad_norm)
 
@@ -517,7 +615,45 @@ class OpenWAMTrainer:
         arch = self.accelerator.unwrap_model(self.architecture)
         # Propagate device down through architecture; frozen modules (T5/VAE) idempotent move.
         arch.set_dtype_device(arch.dtype, self.accelerator.device)
-        arch.move_frozen_to_device(self.accelerator.device)
+        # When RoboTwin T5 cache is on, prepare_inputs never calls text_encoder.
+        # Prefer skip_text_encoder at build time (no UMT5); if still present, park on CPU.
+        use_t5_cache = bool(getattr(getattr(self.cfg, "dataloader", None), "use_t5_cache", False))
+        if use_t5_cache:
+            arch.move_frozen_to_device(self.accelerator.device, names=("vae",))
+            _te = None
+            try:
+                _te = arch.get_submodule("text_encoder")
+            except (AttributeError, KeyError):
+                _te = None
+            if _te is None:
+                for bb in getattr(arch, "backbones", {}).values():
+                    try:
+                        _te = bb.get_submodule("text_encoder")
+                    except (AttributeError, KeyError):
+                        _te = None
+                    if _te is not None:
+                        break
+            if _te is not None:
+                _te.to(device="cpu")
+                logger.info("use_t5_cache=true: text_encoder kept on CPU (disk embeds used)")
+            else:
+                logger.info("use_t5_cache=true: text_encoder not present (skip_text_encoder)")
+        else:
+            arch.move_frozen_to_device(self.accelerator.device, names=("text_encoder", "vae"))
+        if self.fpd is not None:
+            # Teacher is not accelerator-prepared; move DiT/action only.
+            # Frozen encoders/VAE already shared with student (see _setup_fpd).
+            teacher = self.fpd.teacher
+            self._share_fpd_frozen_modules(arch, teacher)
+            teacher.set_dtype_device(arch.dtype, self.accelerator.device)
+            if use_t5_cache:
+                # Keep teacher's T5 on CPU too if present (usually shared pointer).
+                try:
+                    t_te = teacher.video_backbone.get_submodule("text_encoder")
+                    if t_te is not None:
+                        t_te.to(device="cpu")
+                except Exception:
+                    pass
         logger.info(
             "architecture wrapped (%s), device=%s",
             type(self.architecture).__name__,
@@ -552,10 +688,115 @@ class OpenWAMTrainer:
         return global_step, opt_step, start_epoch, skip
 
     # (9) Called each step in train()'s loop — joint video-action loss dict (total/video/action).
+
+    @staticmethod
+    def _share_fpd_frozen_modules(student, teacher, names: tuple[str, ...] = ("text_encoder", "vae")) -> None:
+        """Point teacher's frozen encoder/VAE attrs at the student's modules.
+
+        FPD never runs ``teacher.prepare_inputs``; only DiT/ActionDiT need a
+        separate GPU copy. Sharing T5/VAE frees tens of GiB on H20-class cards.
+        """
+        import gc
+
+        import torch
+
+        def _find_owner(root, attr: str):
+            if hasattr(root, attr) and getattr(root, attr) is not None:
+                return root
+            for bb in getattr(root, "backbones", {}).values():
+                if hasattr(bb, attr) and getattr(bb, attr) is not None:
+                    return bb
+            return None
+
+        freed = []
+        for name in names:
+            s_owner = _find_owner(student, name)
+            t_owner = _find_owner(teacher, name)
+            if s_owner is None or t_owner is None:
+                continue
+            s_mod = getattr(s_owner, name)
+            t_mod = getattr(t_owner, name)
+            if t_mod is s_mod:
+                continue
+            setattr(t_owner, name, s_mod)
+            del t_mod
+            freed.append(name)
+        if freed:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            logger.info("FPD: shared student frozen modules with teacher: %s", ", ".join(freed))
+
+    def _setup_fpd(self, fpd_cfg) -> None:
+        """Build a frozen teacher and wrap student+teacher as OpenWAMFPD."""
+        from openwam.model.fpd import OpenWAMFPD
+        from openwam.train.utils.ckpt_model_loader import build_architecture_from_ckpt_dir
+
+        teacher_ckpt = getattr(fpd_cfg, "teacher_ckpt_path", None)
+        if not teacher_ckpt:
+            raise ValueError("fpd.enabled=true requires fpd.teacher_ckpt_path")
+
+        logger.info("FPD enabled: building frozen teacher from %s", teacher_ckpt)
+        # Build teacher from ckpt config only (no live override) so it matches the
+        # released OpenWAM checkpoint; student already applied live overrides.
+        # Pass live cfg so video_backbone.model_path (and other host paths)
+        # override the placeholder paths in the released checkpoint config.yaml.
+        _, teacher, _ = build_architecture_from_ckpt_dir(
+            teacher_ckpt,
+            weights_required=True,
+            override_cfg=self.cfg,
+            skip_text_encoder=bool(getattr(getattr(self.cfg, "dataloader", None), "use_t5_cache", False)),
+        )
+        teacher.eval()
+        for p in teacher.parameters():
+            p.requires_grad_(False)
+
+        # FPD only needs teacher DiT/ActionDiT; share frozen VAE/T5 with student
+        # so we do not keep a second copy on GPU (otherwise bs=1 OOMs on H20 96G).
+        self._share_fpd_frozen_modules(self.architecture, teacher)
+
+        # Teacher uses the same training schedule buffers as student.
+        teacher.init_training_schedulers(1000)
+        t = self.cfg.training
+        teacher.set_training_runtime(
+            use_gradient_checkpointing=bool(t.use_gradient_checkpointing),
+            use_gradient_checkpointing_offload=bool(t.use_gradient_checkpointing_offload),
+            max_timestep_boundary=float(t.max_timestep_boundary),
+            min_timestep_boundary=float(t.min_timestep_boundary),
+        )
+
+        self.fpd = OpenWAMFPD(
+            student=self.architecture,
+            teacher=teacher,
+            lambda_action=self.lambda_action,
+            lambda_video=self.lambda_video,
+            lambda_distill=self.lambda_distill if self.lambda_distill > 0 else 1.0,
+            use_distill_gate=self.use_distill_gate,
+        )
+        logger.info(
+            "FPD ready: lambda_a=%.4g lambda_v=%.4g lambda_d=%.4g gate=%s",
+            self.fpd.lambda_action,
+            self.fpd.lambda_video,
+            self.fpd.lambda_distill,
+            self.fpd.use_distill_gate,
+        )
+
     def compute_loss(self, batch) -> dict:
-        """Compute joint video-action loss. Returns dict: total/video/action."""
+        """Compute joint video-action loss. Returns dict: total/video/action[+distill]."""
         if not isinstance(batch, list):
             batch = [batch]
+
+        if self.fpd is not None:
+            result = self.fpd.compute_loss(batch)
+            out = {
+                "total": result["loss"],
+                "video": result.get("loss_video", torch.tensor(0.0)),
+                "action": result.get("loss_action", torch.tensor(0.0)),
+                "distill": result.get("loss_distill", torch.tensor(0.0)),
+                "distill_gate_frac": result.get("distill_gate_frac", 0.0),
+                "student_minus_teacher": result.get("student_minus_teacher", 0.0),
+            }
+            return out
 
         inputs = self.architecture.prepare_inputs(batch)
         if self.lambda_action > 0 and inputs.get("actions") is None:
@@ -565,6 +806,7 @@ class OpenWAMTrainer:
             **inputs,
             lambda_video=self.lambda_video,
             lambda_action=self.lambda_action,
+            video_mode=self.video_mode,
         )
 
         return {
@@ -591,6 +833,8 @@ class OpenWAMTrainer:
     ) -> None:
         """Update progress bar, log to wandb, and (debug) write the loss-history CSV row."""
         labels = [("action", "loss_action")]
+        if "loss_distill" in metrics:
+            labels.append(("distill", "loss_distill"))
         loss_total = metrics["loss_total"]
         loss_video = metrics["loss_video"]
         grad_norm = metrics["grad_norm"]
@@ -616,6 +860,10 @@ class OpenWAMTrainer:
             }
             for name, key in labels:
                 log_dict[f"train/loss_{name}"] = metrics[key]
+            if "distill_gate_frac" in metrics:
+                log_dict["train/distill_gate_frac"] = metrics["distill_gate_frac"]
+            if "student_minus_teacher" in metrics:
+                log_dict["train/student_minus_teacher"] = metrics["student_minus_teacher"]
             wandb_run.log(log_dict, step=global_step)
 
         if not debug:

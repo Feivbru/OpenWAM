@@ -80,6 +80,7 @@ class WanBase(VideoBackbone):
         self.vace = None
         self.image_encoder = None
         self.motion_controller = None
+        self.text_encoder = None
         # Promote sub-modules to named children so state_dict uses clean prefixes.
         for _name in ("dit", "dit2", "vae", "vace", "vace2", "text_encoder", "image_encoder", "motion_controller"):
             _mod = getattr(holder, _name, None)
@@ -770,9 +771,19 @@ class WanBase(VideoBackbone):
         )
 
         batch_size = len(frames)
-        context, seq_lens = wan_encode.encode_text(
-            text, tokenizer=self._tokenizer, text_encoder=self.text_encoder, device=self.device
-        )
+        text_context = kw.get("text_context")
+        text_seq_lens = kw.get("text_seq_lens")
+        if text_context is not None:
+            context = text_context.to(device=device, dtype=dtype)
+            if text_seq_lens is None:
+                raise ValueError("text_context requires text_seq_lens")
+            seq_lens = text_seq_lens.to(device=device).long()
+        else:
+            if text is None:
+                raise ValueError("preprocess_input_for_train needs `text` or `text_context`")
+            context, seq_lens = wan_encode.encode_text(
+                text, tokenizer=self._tokenizer, text_encoder=self.text_encoder, device=self.device
+            )
 
         all_input_videos = []
         for clip_frames in frames:
@@ -1039,6 +1050,50 @@ class WanBase(VideoBackbone):
             device=self.device,
         )
         return inputs_shared
+
+    def preprocess_external_context_for_inference(
+        self,
+        *,
+        context: Tensor,
+        seq_lens: Tensor,
+        prompt: str = "",
+        **kw,
+    ) -> dict:
+        """Same denoising inputs as ``preprocess_input_for_inference``, but the
+        text embedding is supplied by the caller.
+
+        Does not call ``text_encoder``. Used by batched eval, where a separate
+        encoder process owns UMT5. The original preprocess entry point is
+        unchanged; this method only swaps the encode call for the tensors it
+        was given.
+        """
+        ctx = context.detach()
+        if ctx.ndim == 2:
+            ctx = ctx.unsqueeze(0)
+        if ctx.ndim != 3 or ctx.shape[0] != 1:
+            raise ValueError(f"external context must be [L, D] or [1, L, D], got {tuple(context.shape)}")
+        sl = seq_lens.detach()
+        if sl.ndim == 0:
+            sl = sl.unsqueeze(0)
+        if sl.ndim != 1 or sl.shape[0] != 1:
+            raise ValueError(f"external seq_lens must be scalar or [1], got {tuple(seq_lens.shape)}")
+        ctx = ctx.to(device=self.device, dtype=self.dtype)
+        sl = sl.to(device=self.device, dtype=torch.long)
+
+        def _inject(*_args, **_kwargs):
+            return ctx, sl
+
+        original = wan_encode.encode_text_for_inference
+        wan_encode.encode_text_for_inference = _inject
+        try:
+            return self.preprocess_input_for_inference(
+                prompt=prompt,
+                vace_cache=None,
+                prompt_embed_cache=None,
+                **kw,
+            )
+        finally:
+            wan_encode.encode_text_for_inference = original
 
 
 class Wan22Ti2v(WanBase):

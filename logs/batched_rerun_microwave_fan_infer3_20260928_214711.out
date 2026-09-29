@@ -1,0 +1,4 @@
+[batched_eval] WARNING: colocating infer+sim on GPU(s): 3
+[batched_eval] topology=split infer_gpus=3 sim_gpus=2,3 n_sims=3 width=6 modes=demo_clean+demo_randomized tasks=2 seed=0 logs=/data/zixian_guo/projects/haoming/project/PI/OpenWAM/logs/batched_eval_fpd_rerun_microwave_fan_infer3_skipfront_demo_clean+demo_randomized_20260928_214712
+[batched_eval]   infer[0] gpu=3 owns 2 sim GPU(s) -> n_slots=6
+[batched_eval] infer gpu 3: encoder :9203 (cpu)  inference :9202  n_slots=6 max_batch=2

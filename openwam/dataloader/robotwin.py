@@ -199,7 +199,10 @@ def _resolve_prompt(
     ep_file: str,
     split: str,
     task_name: str,
-) -> str:
+    *,
+    use_t5_cache: bool = False,
+    t5_top_k: int = 10,
+) -> tuple[str, Optional[int]]:
     """Pure function: build the training-time prompt from raw state.
 
     Extracted from :meth:`RoboTwinDataset._get_prompt` so tests and
@@ -218,22 +221,39 @@ def _resolve_prompt(
             anything else deterministically picks the first entry.
         task_name: Falls back to ``f"... performing a {task_name} task."``
             when instructions don't supply a prompt for this episode.
+        use_t5_cache: When True, only sample from ``seen[:t5_top_k]`` and
+            return the pool index so callers can load the matching cache.
+        t5_top_k: Size of the cached instruction pool (default 10).
 
     Returns:
-        The final wrapped prompt string that the model sees.
+        ``(wrapped_prompt, instr_idx)``. ``instr_idx`` is set only when
+        ``use_t5_cache`` is True (index into ``seen[:t5_top_k]``); otherwise
+        ``None``.
     """
     ep_basename = os.path.basename(ep_file)
     ep_num = ep_basename.replace("episode", "").replace(".hdf5", "")
     instr_key = f"episode{ep_num}.json"
 
     base_prompt = None
+    instr_idx: Optional[int] = None
     if instr_key in instructions:
         instr = instructions[instr_key]
         if isinstance(instr, dict):
             # RoboTwin format: {"seen": [...], "unseen": [...]}
             pool = instr.get("seen") or instr.get("unseen") or []
             if pool:
-                if split == "train":
+                if use_t5_cache:
+                    pool = list(pool[: int(t5_top_k)])
+                    if len(pool) < int(t5_top_k):
+                        raise ValueError(
+                            f"{instr_key}: need >= {t5_top_k} seen for T5 cache, got {len(pool)}"
+                        )
+                    if split == "train":
+                        instr_idx = random.randrange(len(pool))
+                    else:
+                        instr_idx = 0
+                    base_prompt = pool[instr_idx]
+                elif split == "train":
                     base_prompt = random.choice(pool)
                 else:
                     base_prompt = pool[0]
@@ -245,9 +265,11 @@ def _resolve_prompt(
             base_prompt = instr[0] if isinstance(instr[0], str) else str(instr[0])
 
     if base_prompt is None:
+        if use_t5_cache:
+            raise ValueError(f"{instr_key}: T5 cache requires a seen instruction pool")
         base_prompt = f"The bimanual robot is performing a {task_name} task."
 
-    return format_prompt_for_inference(base_prompt)
+    return format_prompt_for_inference(base_prompt), instr_idx
 
 
 class RoboTwinDataset(BaseDataset):
@@ -297,11 +319,18 @@ class RoboTwinDataset(BaseDataset):
         # (default). Truthy → enabled; a dict overrides
         # the per-channel strengths {brightness, contrast, saturation, hue}.
         color_jitter: Optional[Any] = None,
+        use_t5_cache: bool = False,
+        t5_cache_dirname: str = "umt5_openwam",
+        t5_top_k: int = 10,
     ):
         super().__init__()
         self.embodiment = embodiment
         self.variant = variant
         self.action_mode = action_mode
+        self.use_t5_cache = bool(use_t5_cache)
+        self.t5_cache_dirname = str(t5_cache_dirname or "umt5_openwam")
+        self.t5_top_k = int(t5_top_k)
+        self._t5_cache_files: dict[int, dict] = {}
         self._unify_action = bool(unify_action)
         self._unify_action_map = unify_action_map
         if unify_state_map is not None and list(unify_state_map) != list(self._unify_action_map or ()):
@@ -590,6 +619,12 @@ class RoboTwinDataset(BaseDataset):
                         pass
             if self._instructions:
                 print(f"  Loaded {len(self._instructions)} instruction files")
+        if self.use_t5_cache:
+            cache_dir = os.path.join(os.path.dirname(data_root), self.t5_cache_dirname)
+            print(
+                f"  T5 cache ON: dirname={self.t5_cache_dirname}, top_k={self.t5_top_k}, "
+                f"dir={cache_dir}"
+            )
 
     @property
     def action_dim(self) -> int:
@@ -692,8 +727,8 @@ class RoboTwinDataset(BaseDataset):
             )
         return images
 
-    def _get_prompt(self, ep_idx: int) -> str:
-        """Get the wrapped text prompt for episode *ep_idx*.
+    def _get_prompt(self, ep_idx: int) -> tuple[str, Optional[int]]:
+        """Get the wrapped text prompt (and optional T5-cache index) for *ep_idx*.
 
         Thin wrapper over :func:`_resolve_prompt` — all logic lives in the
         pure helper so tests and downstream adapters don't need a fully
@@ -704,7 +739,52 @@ class RoboTwinDataset(BaseDataset):
             ep_file=self._episode_files[ep_idx],
             split=self.split,
             task_name=self.task_name,
+            use_t5_cache=self.use_t5_cache,
+            t5_top_k=self.t5_top_k,
         )
+
+    def _load_t5_context(self, ep_idx: int, instr_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Load cached UMT5 context for ``seen[instr_idx]`` of episode *ep_idx*."""
+        path = self._episode_files[ep_idx]
+        ep_basename = os.path.basename(path)
+        ep_num = int(ep_basename.replace("episode", "").replace(".hdf5", ""))
+        if ep_num not in self._t5_cache_files:
+            cache_path = os.path.join(
+                os.path.dirname(self.data_root),
+                self.t5_cache_dirname,
+                f"episode{ep_num}.pt",
+            )
+            if not os.path.isfile(cache_path):
+                raise FileNotFoundError(
+                    f"use_t5_cache=true but missing T5 cache file: {cache_path}"
+                )
+            self._t5_cache_files[ep_num] = torch.load(cache_path, map_location="cpu", weights_only=False)
+        payload = self._t5_cache_files[ep_num]
+        contexts = payload["contexts"]
+        seq_lens = payload["seq_lens"]
+        if instr_idx < 0 or instr_idx >= len(contexts):
+            raise IndexError(
+                f"T5 cache instr_idx={instr_idx} out of range for episode{ep_num} "
+                f"(n={len(contexts)})"
+            )
+        ctx = contexts[instr_idx]
+        if not isinstance(ctx, torch.Tensor):
+            ctx = torch.as_tensor(ctx)
+        ctx = ctx.detach().to(dtype=torch.bfloat16, device="cpu").contiguous()
+        if isinstance(seq_lens, torch.Tensor):
+            L = int(seq_lens[instr_idx].item())
+        else:
+            L = int(seq_lens[instr_idx])
+        if ctx.ndim != 2 or ctx.shape[0] != L:
+            # Tolerate full-padded caches by truncating to declared length.
+            if ctx.ndim == 2 and ctx.shape[0] >= L:
+                ctx = ctx[:L].contiguous()
+            else:
+                raise ValueError(
+                    f"episode{ep_num} instr{instr_idx}: context shape {tuple(ctx.shape)} "
+                    f"incompatible with seq_len={L}"
+                )
+        return ctx, torch.tensor(L, dtype=torch.long)
 
     def _read_eef_actions(self, f, start: int, end: int) -> np.ndarray:
         """Read endpose keys and assemble 20D EEF action vector.
@@ -829,7 +909,7 @@ class RoboTwinDataset(BaseDataset):
             action_mask = action_mask & dim_valid.unsqueeze(0)
             proprio_mask = proprio_mask & dim_valid.unsqueeze(0)
 
-        prompt = self._get_prompt(ep_idx)
+        prompt, instr_idx = self._get_prompt(ep_idx)
 
         ep_key = f"episode_{ep_idx}"
         ep_scene = self._scene_info.get(ep_key, {})
@@ -839,7 +919,7 @@ class RoboTwinDataset(BaseDataset):
         action_tensor = torch.from_numpy(action_np)
         proprio_tensor = torch.from_numpy(proprio_np)
 
-        return {
+        sample = {
             "video": sampled_video,
             "vace_video": None,
             "first_frame_image": [sampled_video[0]],
@@ -857,6 +937,14 @@ class RoboTwinDataset(BaseDataset):
             "task_name": self.task_name,
             "active_arm": active_arm,
         }
+        if self.use_t5_cache:
+            if instr_idx is None:
+                raise RuntimeError("use_t5_cache=true but prompt resolver returned no instr_idx")
+            t5_context, t5_seq_lens = self._load_t5_context(ep_idx, instr_idx)
+            sample["t5_context"] = t5_context
+            sample["t5_seq_lens"] = t5_seq_lens
+            sample["t5_instr_idx"] = int(instr_idx)
+        return sample
 
     def __getitem__(self, idx):
         ep_idx, start = self._window_index[idx]
@@ -912,6 +1000,10 @@ class MultiTaskRoboTwinDataset(BaseDataset):
         if _cam_layout is not None:
             _cam_layout = list(_cam_layout)
 
+        _tasks = _get("tasks", None)
+        if _tasks is not None:
+            _tasks = list(_tasks)
+
         # normalize_mode can be null/None to disable
         _norm_mode = _get("normalize_mode", "min-max")
         if isinstance(_norm_mode, str) and _norm_mode.lower() in ("none", "null", ""):
@@ -921,6 +1013,7 @@ class MultiTaskRoboTwinDataset(BaseDataset):
             dataset_dir=_get("dataset_dir"),
             embodiment=_get("embodiment", "aloha-agilex"),
             variant=_get("variant", "both"),
+            tasks=_tasks,
             normalization_stats_path=_get("normalization_stats_path", None),
             normalize_mode=_norm_mode,
             action_mode=_get("action_mode", "eef"),
@@ -938,6 +1031,9 @@ class MultiTaskRoboTwinDataset(BaseDataset):
             unify_action_map=_get("unify_action_map", None),
             unify_state_map=_get("unify_state_map", None),
             color_jitter=_get("color_jitter", None),
+            use_t5_cache=bool(_get("use_t5_cache", False)),
+            t5_cache_dirname=str(_get("t5_cache_dirname", "umt5_openwam") or "umt5_openwam"),
+            t5_top_k=int(_get("t5_top_k", 10) or 10),
         )
 
     def __init__(

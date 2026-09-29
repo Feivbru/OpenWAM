@@ -1,0 +1,16 @@
+===== RANK 0 EXCEPTION (pre-destroy) =====
+cuda:0 allocated=60.61GiB reserved=79.48GiB peak_alloc=79.25GiB
+cuda:1 allocated=0.00GiB reserved=0.00GiB peak_alloc=0.00GiB
+Traceback (most recent call last):
+  File "/data/zixian_guo/projects/haoming/project/PI/OpenWAM/scripts/train.py", line 188, in main
+    _train(cfg)
+  File "/data/zixian_guo/projects/haoming/project/PI/OpenWAM/scripts/train.py", line 134, in _train
+    _train_openwam(cfg)
+  File "/data/zixian_guo/projects/haoming/project/PI/OpenWAM/scripts/train.py", line 161, in _train_openwam
+    trainer.train()
+  File "/data/zixian_guo/projects/haoming/project/PI/OpenWAM/openwam/train/openwam_trainer.py", line 381, in train
+    raise RuntimeError(
+RuntimeError: non-finite loss at step=1 epoch=0: total=nan video=0.0 action=nan bad_trainable_params=1
+
+cwd=/data/zixian_guo/projects/haoming/project/PI/OpenWAM
+argv=['scripts/train.py', '--config-name=train_teacher_libero', 'model.video_backbone.model_path=/data/zixian_guo/projects/haoming/project/Motus/pretrained_models/Wan2.2-TI2V-5B', 'project.wandb.mode=offline', 'training.debug=true', 'training.batch_size=1', 'model.architecture.mot_checkpoint_mixed_attn=false', 'project.wandb.mode=offline']

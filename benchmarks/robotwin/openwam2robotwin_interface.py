@@ -43,6 +43,7 @@ if _PROJECT_ROOT not in _sys.path:
 import json  # noqa: E402
 import os  # noqa: E402
 import time  # noqa: E402
+from collections import deque  # noqa: E402
 from typing import Dict, Optional  # noqa: E402
 
 import cv2 as cv  # noqa: E402
@@ -165,7 +166,7 @@ class ModelClient:
         port: int = 8848,
         send_state: bool = True,
         state_dim: Optional[int] = None,
-        request_timeout: int = 300,
+        request_timeout: int = 900,
         action_indices: Optional[list] = None,
         action_type: str = "qpos",
         debug: bool = False,
@@ -209,6 +210,9 @@ class ModelClient:
         self._debug_dir = debug_dir
         self._episode = -1  # incremented to 0 on the first reset_model() call
         self._step = 0
+        self._pending: deque = deque()
+        raw_slot = os.environ.get("ROBOTWIN_SLOT", "").strip()
+        self._slot_id = int(raw_slot) if raw_slot else None
 
         self._ws_url = f"ws://{host}:{port}"
         self._client = WSPolicyClient(self._ws_url, timeout=request_timeout)
@@ -254,7 +258,8 @@ class ModelClient:
                 os.makedirs(ep_dir, exist_ok=True)
                 print(f"[OpenWAMClient] debug images → {ep_dir}")
         self._task_description = task_description
-        result = self._client.reset()
+        self._pending.clear()
+        result = self._client.reset(slot_id=self._slot_id)
         if result.get("type") != transport.RESET_ACK:
             raise RuntimeError(f"[OpenWAMClient] Server reset failed: {result}")
 
@@ -296,24 +301,24 @@ class ModelClient:
         with open(os.path.join(step_dir, "meta.json"), "w") as f:
             json.dump(meta, f, indent=2)
 
-    def step(self, example: dict) -> np.ndarray:
-        """
-        Submit one observation to the server and return the next action.
+    def should_request_observation(self) -> bool:
+        """False while a previously returned action chunk is still being executed."""
+        return not self._pending
 
-        Args:
-            example: {
-                "cams": {
-                    "head":  np.ndarray,      # HxWx3 RGB uint8, required
-                    "left":  np.ndarray|None, # HxWx3 RGB uint8, optional
-                    "right": np.ndarray|None, # HxWx3 RGB uint8, optional
-                },
-                "lang":  str,                 # task instruction
-                "state": np.ndarray,          # proprioceptive state (optional)
-            }
-
-        Returns:
-            action: np.ndarray, shape (action_dim,)
+    def step(self, example: Optional[dict]) -> np.ndarray:
         """
+        Return the next action.
+
+        A fresh observation is sent only when the local chunk is empty. The
+        server replies with the whole chunk; later calls pop it locally and
+        do not render or transmit camera images.
+        """
+        if self._pending:
+            self._step += 1
+            return self._pending.popleft()
+        if not example:
+            raise ValueError("[OpenWAMClient] Observation is required when the action chunk is empty.")
+
         cams = example["cams"]
         instruction = str(example.get("lang", self._task_description))
 
@@ -348,17 +353,23 @@ class ModelClient:
             prompt=prompt,
             state=state_list,
         )
+        if self._slot_id is not None:
+            payload["slot_id"] = self._slot_id
         response = self._client.predict(payload)
-        action = np.array(response["action"], dtype=np.float32)
+        raw_chunk = response.get("actions") or [response["action"]]
+        for raw in raw_chunk:
+            action = np.array(raw, dtype=np.float32)
+            if self._action_indices is not None:
+                action = action[self._action_indices]
+            self._pending.append(action)
 
         self._step += 1
         if self._debug:
             self._save_debug_step(cams, prompt, state_list, response)
 
-        if self._action_indices is not None:
-            action = action[self._action_indices]
-
-        return action
+        if not self._pending:
+            raise RuntimeError("[OpenWAMClient] Server returned an empty action chunk.")
+        return self._pending.popleft()
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +383,7 @@ def get_model(usr_args: dict) -> ModelClient:
         port=int(usr_args.get("port", 8848)),
         send_state=_parse_bool(usr_args.get("send_state", True), default=True),
         state_dim=_parse_optional_int(usr_args.get("state_dim", None), "state_dim"),
-        request_timeout=int(usr_args.get("request_timeout", 300)),
+        request_timeout=int(usr_args.get("request_timeout", 900)),
         action_indices=usr_args.get("action_indices", None),
         action_type=usr_args.get("action_type", "qpos"),
         debug=_parse_bool(usr_args.get("debug", False), default=False),
@@ -416,33 +427,31 @@ def _extract_proprio(model: ModelClient, observation: dict) -> np.ndarray:
         ) from exc
 
 
-def eval(TASK_ENV, model: ModelClient, observation: dict) -> None:
+def eval(TASK_ENV, model: ModelClient, observation: Optional[dict]) -> None:
     """Per-step callback invoked by RoboTwin's eval_policy.py.
 
-    RoboTwin exposes three per-camera entries under ``observation["observation"]``
-    (``head_camera`` / ``left_camera`` / ``right_camera``). They map positionally
-    to the OpenWAM client API's fixed fields (head / left_wrist / right_wrist).
-    ``front_camera`` is ignored — it's not part of the server contract.
+    Camera images are read only on replan steps. While the returned action
+    chunk is still buffered, ``observation`` is None and the next action is
+    applied without another render or server round-trip.
     """
-    _apply_step_lim_override(TASK_ENV)
+    from benchmarks.robotwin import policy_runtime
 
-    instruction = TASK_ENV.get_instruction()
-    obs = observation["observation"]
+    policy_runtime.apply_step_lim_override(TASK_ENV)
 
-    example = {
-        "cams": {
-            "head": obs["head_camera"]["rgb"],
-            "left": obs.get("left_camera", {}).get("rgb"),
-            "right": obs.get("right_camera", {}).get("rgb"),
-        },
-        "lang": str(instruction),
-        "state": _extract_proprio(model, observation) if model._send_state else None,
-    }
+    if observation is None:
+        action = model.step(None)
+    else:
+        instruction = TASK_ENV.get_instruction()
+        example = {
+            "cams": policy_runtime.build_cams_from_observation(observation),
+            "lang": str(instruction),
+            "state": (
+                policy_runtime.extract_proprio(model._action_type, observation)
+                if model._send_state
+                else None
+            ),
+        }
+        action = model.step(example)
 
-    action = model.step(example)
-
-    # EEF mode: convert 20D (xyz+rot6d+grip)×2 → 16D (xyz+quat+grip)×2.
-    if model._action_type == "ee" and len(action) == 20:
-        action = action_conversion.eef20d_to_ee16d(action)
-
+    action = policy_runtime.maybe_convert_ee_action(action, model._action_type)
     TASK_ENV.take_action(action, action_type=model._action_type)

@@ -1,0 +1,7 @@
+Starting OpenWAM RoboTwin local (in-process) evaluation
+  python: /data/anaconda3/envs/openwam/bin/python
+  ckpt:   /data/zixian_guo/projects/haoming/project/PI/OpenWAM/outputs/openwam_fpd_robotwin_full/2026-09-24_22-18-53
+  gpus:   3 (num_gpus=1)
+  max_tasks_per_gpu: 1
+  phases: both
+  log:    /data/zixian_guo/projects/haoming/project/PI/OpenWAM/logs/robotwin_local_20260927_202837.log

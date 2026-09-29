@@ -1,0 +1,43 @@
+===== RANK 0 EXCEPTION (pre-destroy) =====
+cuda:0 allocated=93.77GiB reserved=93.78GiB peak_alloc=93.77GiB
+Traceback (most recent call last):
+  File "/data/zixian_guo/projects/haoming/project/PI/OpenWAM/scripts/train.py", line 188, in main
+    _train(cfg)
+  File "/data/zixian_guo/projects/haoming/project/PI/OpenWAM/scripts/train.py", line 134, in _train
+    _train_openwam(cfg)
+  File "/data/zixian_guo/projects/haoming/project/PI/OpenWAM/scripts/train.py", line 161, in _train_openwam
+    trainer.train()
+  File "/data/zixian_guo/projects/haoming/project/PI/OpenWAM/openwam/train/openwam_trainer.py", line 284, in train
+    optimizer, dataloader, scheduler = self.prepare_accelerate(optimizer, dataloader, scheduler)
+  File "/data/zixian_guo/projects/haoming/project/PI/OpenWAM/openwam/train/openwam_trainer.py", line 600, in prepare_accelerate
+    self.architecture, optimizer, dataloader = self.accelerator.prepare(*prepare_args)
+  File "/data/anaconda3/envs/openwam/lib/python3.10/site-packages/accelerate/accelerator.py", line 1550, in prepare
+    result = self._prepare_deepspeed(*args)
+  File "/data/anaconda3/envs/openwam/lib/python3.10/site-packages/accelerate/accelerator.py", line 2450, in _prepare_deepspeed
+    engine, optimizer, _, lr_scheduler = ds_initialize(**kwargs)
+  File "/data/anaconda3/envs/openwam/lib/python3.10/site-packages/deepspeed/__init__.py", line 214, in initialize
+    engine = DeepSpeedEngine(args=args,
+  File "/data/anaconda3/envs/openwam/lib/python3.10/site-packages/deepspeed/runtime/engine.py", line 365, in __init__
+    self._configure_optimizer(optimizer, model_parameters)
+  File "/data/anaconda3/envs/openwam/lib/python3.10/site-packages/deepspeed/runtime/engine.py", line 1638, in _configure_optimizer
+    self.optimizer = self._configure_fp16_optimizer(basic_optimizer, lp_dtype)
+  File "/data/anaconda3/envs/openwam/lib/python3.10/site-packages/deepspeed/runtime/engine.py", line 1862, in _configure_fp16_optimizer
+    optimizer = FP16_UnfusedOptimizer(
+  File "/data/anaconda3/envs/openwam/lib/python3.10/site-packages/deepspeed/runtime/fp16/unfused_optimizer.py", line 106, in __init__
+    self.initialize_optimizer_states()
+  File "/data/anaconda3/envs/openwam/lib/python3.10/site-packages/deepspeed/runtime/fp16/unfused_optimizer.py", line 419, in initialize_optimizer_states
+    self.optimizer.step()
+  File "/data/anaconda3/envs/openwam/lib/python3.10/site-packages/torch/optim/optimizer.py", line 485, in wrapper
+    out = func(*args, **kwargs)
+  File "/data/anaconda3/envs/openwam/lib/python3.10/site-packages/torch/optim/optimizer.py", line 79, in _use_grad
+    ret = func(self, *args, **kwargs)
+  File "/data/anaconda3/envs/openwam/lib/python3.10/site-packages/torch/optim/adam.py", line 236, in step
+    has_complex = self._init_group(
+  File "/data/anaconda3/envs/openwam/lib/python3.10/site-packages/torch/_dynamo/eval_frame.py", line 838, in _fn
+    return fn(*args, **kwargs)
+  File "/data/anaconda3/envs/openwam/lib/python3.10/site-packages/torch/optim/adam.py", line 176, in _init_group
+    state["exp_avg"] = torch.zeros_like(
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 36.00 MiB. GPU 0 has a total capacity of 95.10 GiB of which 25.94 MiB is free. Including non-PyTorch memory, this process has 95.07 GiB memory in use. Of the allocated memory 93.77 GiB is allocated by PyTorch, and 14.91 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+
+cwd=/data/zixian_guo/projects/haoming/project/PI/OpenWAM
+argv=['scripts/train.py', '--config-name=train_teacher_libero', 'model.video_backbone.model_path=/data/zixian_guo/projects/haoming/project/Motus/pretrained_models/Wan2.2-TI2V-5B', 'project.wandb.mode=offline', 'training.debug=true', 'training.batch_size=1', 'training.learning_rate=0.0', 'model.architecture.mot_checkpoint_mixed_attn=false', 'training.zero_stage=0', 'project.wandb.mode=offline']

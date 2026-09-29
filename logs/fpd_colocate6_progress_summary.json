@@ -1,0 +1,228 @@
+{
+  "stamp": "colocate_6_20260925_122013",
+  "done_count": 39,
+  "partial_count": 6,
+  "done": {
+    "adjust_bottle": {
+      "success": 100,
+      "total": 100,
+      "rate": 100.0
+    },
+    "beat_block_hammer": {
+      "success": 100,
+      "total": 100,
+      "rate": 100.0
+    },
+    "blocks_ranking_rgb": {
+      "success": 100,
+      "total": 100,
+      "rate": 100.0
+    },
+    "blocks_ranking_size": {
+      "success": 81,
+      "total": 100,
+      "rate": 81.0
+    },
+    "click_alarmclock": {
+      "success": 95,
+      "total": 100,
+      "rate": 95.0
+    },
+    "click_bell": {
+      "success": 100,
+      "total": 100,
+      "rate": 100.0
+    },
+    "dump_bin_bigbin": {
+      "success": 97,
+      "total": 100,
+      "rate": 97.0
+    },
+    "grab_roller": {
+      "success": 100,
+      "total": 100,
+      "rate": 100.0
+    },
+    "handover_block": {
+      "success": 99,
+      "total": 100,
+      "rate": 99.0
+    },
+    "handover_mic": {
+      "success": 91,
+      "total": 100,
+      "rate": 91.0
+    },
+    "hanging_mug": {
+      "success": 49,
+      "total": 100,
+      "rate": 49.0
+    },
+    "lift_pot": {
+      "success": 100,
+      "total": 100,
+      "rate": 100.0
+    },
+    "move_can_pot": {
+      "success": 100,
+      "total": 100,
+      "rate": 100.0
+    },
+    "move_pillbottle_pad": {
+      "success": 98,
+      "total": 100,
+      "rate": 98.0
+    },
+    "move_playingcard_away": {
+      "success": 100,
+      "total": 100,
+      "rate": 100.0
+    },
+    "move_stapler_pad": {
+      "success": 97,
+      "total": 100,
+      "rate": 97.0
+    },
+    "open_laptop": {
+      "success": 99,
+      "total": 100,
+      "rate": 99.0
+    },
+    "open_microwave": {
+      "success": 94,
+      "total": 100,
+      "rate": 94.0
+    },
+    "pick_diverse_bottles": {
+      "success": 82,
+      "total": 100,
+      "rate": 82.0
+    },
+    "pick_dual_bottles": {
+      "success": 96,
+      "total": 100,
+      "rate": 96.0
+    },
+    "place_a2b_left": {
+      "success": 99,
+      "total": 100,
+      "rate": 99.0
+    },
+    "place_a2b_right": {
+      "success": 98,
+      "total": 100,
+      "rate": 98.0
+    },
+    "place_bread_basket": {
+      "success": 92,
+      "total": 100,
+      "rate": 92.0
+    },
+    "place_bread_skillet": {
+      "success": 94,
+      "total": 100,
+      "rate": 94.0
+    },
+    "place_burger_fries": {
+      "success": 97,
+      "total": 100,
+      "rate": 97.0
+    },
+    "place_can_basket": {
+      "success": 82,
+      "total": 100,
+      "rate": 82.0
+    },
+    "place_cans_plasticbox": {
+      "success": 99,
+      "total": 100,
+      "rate": 99.0
+    },
+    "place_container_plate": {
+      "success": 98,
+      "total": 100,
+      "rate": 98.0
+    },
+    "place_dual_shoes": {
+      "success": 95,
+      "total": 100,
+      "rate": 95.0
+    },
+    "place_empty_cup": {
+      "success": 100,
+      "total": 100,
+      "rate": 100.0
+    },
+    "place_fan": {
+      "success": 96,
+      "total": 100,
+      "rate": 96.0
+    },
+    "place_mouse_pad": {
+      "success": 99,
+      "total": 100,
+      "rate": 99.0
+    },
+    "place_object_basket": {
+      "success": 92,
+      "total": 100,
+      "rate": 92.0
+    },
+    "place_object_scale": {
+      "success": 98,
+      "total": 100,
+      "rate": 98.0
+    },
+    "place_object_stand": {
+      "success": 98,
+      "total": 100,
+      "rate": 98.0
+    },
+    "place_phone_stand": {
+      "success": 89,
+      "total": 100,
+      "rate": 89.0
+    },
+    "place_shoe": {
+      "success": 99,
+      "total": 100,
+      "rate": 99.0
+    },
+    "press_stapler": {
+      "success": 94,
+      "total": 100,
+      "rate": 94.0
+    },
+    "rotate_qrcode": {
+      "success": 94,
+      "total": 100,
+      "rate": 94.0
+    }
+  },
+  "partial": {
+    "shake_bottle_horizontally": {
+      "success": 84,
+      "total": 84
+    },
+    "shake_bottle": {
+      "success": 68,
+      "total": 68
+    },
+    "scan_object": {
+      "success": 59,
+      "total": 61
+    },
+    "put_object_cabinet": {
+      "success": 44,
+      "total": 49
+    },
+    "put_bottles_dustbin": {
+      "success": 44,
+      "total": 45
+    },
+    "stack_blocks_three": {
+      "success": 2,
+      "total": 2
+    }
+  }
+}

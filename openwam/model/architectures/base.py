@@ -699,6 +699,17 @@ class BaseWAMArchitecture(ABC, nn.Module):
         has_vlm = getattr(self, "vlm_backbone", None) is not None
         has_meta = any(p.device.type == "meta" for p in self.parameters())
         missing, unexpected = self.load_state_dict(state_dict, strict=False, assign=has_meta)
+        if getattr(self, "_ignore_text_encoder_keys", False):
+            kept = []
+            dropped = 0
+            for key in unexpected:
+                if ".text_encoder." in key or key.startswith("text_encoder."):
+                    dropped += 1
+                else:
+                    kept.append(key)
+            if dropped:
+                logger.info("skip_text_encoder: ignored %d text_encoder checkpoint keys", dropped)
+            unexpected = kept
         if strict and not has_vlm:
             if missing or unexpected:
                 raise RuntimeError(f"Strict load failed: missing={missing}, unexpected={unexpected}")
@@ -963,12 +974,52 @@ class BaseWAMArchitecture(ABC, nn.Module):
         if any(ref_flags) and not all(ref_flags):
             raise ValueError("Mixed reference images in batch: all samples must be consistent.")
 
-        preprocessed = self.preprocess(
-            frames=all_frames,
-            text=all_prompts,
-            vace_videos=all_vace_videos,
-            ref_images=all_ref_images if ref_flags[0] else None,
-        )
+        # Optional offline T5 cache: all-or-nothing within a batch.
+        cached_contexts = [s.get("t5_context") for s in samples]
+        n_cached = sum(c is not None for c in cached_contexts)
+        preprocess_kw: dict = {
+            "frames": all_frames,
+            "text": all_prompts,
+            "vace_videos": all_vace_videos,
+            "ref_images": all_ref_images if ref_flags[0] else None,
+        }
+        if n_cached == len(samples):
+            seq_lens_list = []
+            ctx_list = []
+            for s in samples:
+                ctx = s["t5_context"]
+                if isinstance(ctx, np.ndarray):
+                    ctx = torch.from_numpy(ctx)
+                ctx = ctx.to(dtype=_dtype, device="cpu")
+                if ctx.ndim != 2:
+                    raise ValueError(f"t5_context must be [L, D], got shape {tuple(ctx.shape)}")
+                L = s.get("t5_seq_lens")
+                if L is None:
+                    L = ctx.shape[0]
+                elif isinstance(L, torch.Tensor):
+                    L = int(L.item()) if L.numel() == 1 else int(L.reshape(-1)[0].item())
+                else:
+                    L = int(L)
+                if ctx.shape[0] < L:
+                    raise ValueError(f"t5_context length {ctx.shape[0]} < t5_seq_lens {L}")
+                if ctx.shape[0] > L:
+                    ctx = ctx[:L]
+                ctx_list.append(ctx)
+                seq_lens_list.append(L)
+            max_L = max(seq_lens_list)
+            dim = ctx_list[0].shape[-1]
+            padded = torch.zeros(len(ctx_list), max_L, dim, dtype=_dtype)
+            for i, ctx in enumerate(ctx_list):
+                padded[i, : ctx.shape[0]] = ctx
+            preprocess_kw["text_context"] = padded.to(device=_device)
+            preprocess_kw["text_seq_lens"] = torch.tensor(seq_lens_list, dtype=torch.long, device=_device)
+        elif n_cached > 0:
+            raise ValueError(
+                f"Mixed t5_context in batch: {n_cached}/{len(samples)} samples have cache; "
+                "require all-or-nothing"
+            )
+
+        preprocessed = self.preprocess(**preprocess_kw)
 
         action_data = torch.cat(all_actions, dim=0) if all_actions[0] is not None else None
 
@@ -1047,6 +1098,9 @@ class BaseWAMArchitecture(ABC, nn.Module):
         actions: Optional[torch.Tensor] = None,
         lambda_video: float = 1.0,
         lambda_action: float = 1.0,
+        action_noise_bundle: Optional[dict] = None,
+        video_mode: str = "train",
+        return_details: bool = False,
         **inputs,
     ) -> dict:
         """Compute joint video-action flow matching loss.
@@ -1066,11 +1120,23 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 be passed via ``inputs["actions"]``.
             lambda_video: Weight for video loss term.
             lambda_action: Weight for action loss term.
+            action_noise_bundle: Optional shared action FM noise dict (keys:
+                ``noise``, ``timestep_ids``, ``timesteps``, ``sigmas``,
+                ``noisy_actions``, ``target``). When provided, skips internal
+                action noise sampling — used by FPD teacher/student sharing.
+            video_mode: ``"train"`` (default, noisy video) or ``"clean"``
+                (GT latents at σ≈0 endpoint; video loss forced to 0).
+            return_details: If True, also return ``action_pred``,
+                ``action_target``, ``action_timestep_ids``, and unweighted
+                ``action_gt_mse_per_sample`` for FPD distill/gate.
             **inputs: Preprocessed video/text tensors plus forward-time flags.
 
         Returns:
-            dict with keys: loss, loss_video, loss_action.
+            dict with keys: loss, loss_video, loss_action (+ details if requested).
         """
+        if video_mode not in ("train", "clean"):
+            raise ValueError(f"video_mode must be 'train' or 'clean', got {video_mode!r}")
+
         vb = self.video_backbone
         action_scheduler = self.action_backbone.scheduler
         _dtype = self.dtype
@@ -1086,13 +1152,20 @@ class BaseWAMArchitecture(ABC, nn.Module):
         B = inputs["input_latents"].shape[0]
 
         # --- Sample video timesteps ---
-        video_timestep_ids = torch.randint(min_tb, max_tb, (B,))
+        if video_mode == "clean":
+            # σ≈0 endpoint: pick the schedule index with the smallest sigma.
+            sigmas_cpu = vb.scheduler.sigmas.detach().float().cpu()
+            clean_id = int(torch.argmin(sigmas_cpu).item())
+            video_timestep_ids = torch.full((B,), clean_id, dtype=torch.long)
+            video_noise = torch.zeros_like(inputs["input_latents"])
+        else:
+            video_timestep_ids = torch.randint(min_tb, max_tb, (B,))
+            video_noise = torch.randn_like(inputs["input_latents"])
 
         video_timesteps = vb.scheduler.timesteps[video_timestep_ids].to(dtype=_dtype, device=_device)
         video_sigmas = vb.scheduler.sigmas[video_timestep_ids].to(dtype=_dtype, device=_device)
 
         # --- Add video noise (flow-matching: linear interp + velocity target) ---
-        video_noise = torch.randn_like(inputs["input_latents"])
         sigma_bc = video_sigmas.view(B, 1, 1, 1, 1)
         inputs["latents"] = (1 - sigma_bc) * inputs["input_latents"] + sigma_bc * video_noise
         video_target = video_noise - inputs["input_latents"]
@@ -1110,22 +1183,28 @@ class BaseWAMArchitecture(ABC, nn.Module):
             None,
         )
         if lambda_action > 0 and actions is not None:
-            action_timestep_ids = torch.randint(0, len(action_scheduler.timesteps), (B,))
-
-            action_timesteps = action_scheduler.timesteps[action_timestep_ids].to(dtype=_dtype, device=_device)
-            action_sigmas = action_scheduler.sigmas[action_timestep_ids].to(dtype=_dtype, device=_device)
-
             actions = actions.to(dtype=_dtype, device=_device)
             if actions.dim() == 2:
                 actions = actions.unsqueeze(0)
 
-            action_noise = torch.randn_like(actions)
-            if action_sigmas.dim() == 1:
-                a_sigma_bc = action_sigmas.view(B, 1, 1)
+            if action_noise_bundle is not None:
+                action_noise = action_noise_bundle["noise"].to(dtype=_dtype, device=_device)
+                action_timestep_ids = action_noise_bundle["timestep_ids"].to(device="cpu")
+                action_timesteps = action_noise_bundle["timesteps"].to(dtype=_dtype, device=_device)
+                action_sigmas = action_noise_bundle["sigmas"].to(dtype=_dtype, device=_device)
+                noisy_actions = action_noise_bundle["noisy_actions"].to(dtype=_dtype, device=_device)
+                action_target = action_noise_bundle["target"].to(dtype=_dtype, device=_device)
             else:
-                a_sigma_bc = action_sigmas.unsqueeze(-1)
-            noisy_actions = action_scheduler.add_noise(actions, action_noise, a_sigma_bc)
-            action_target = action_scheduler.training_target(actions, action_noise)
+                action_timestep_ids = torch.randint(0, len(action_scheduler.timesteps), (B,))
+                action_timesteps = action_scheduler.timesteps[action_timestep_ids].to(dtype=_dtype, device=_device)
+                action_sigmas = action_scheduler.sigmas[action_timestep_ids].to(dtype=_dtype, device=_device)
+                action_noise = torch.randn_like(actions)
+                if action_sigmas.dim() == 1:
+                    a_sigma_bc = action_sigmas.view(B, 1, 1)
+                else:
+                    a_sigma_bc = action_sigmas.unsqueeze(-1)
+                noisy_actions = action_scheduler.add_noise(actions, action_noise, a_sigma_bc)
+                action_target = action_scheduler.training_target(actions, action_noise)
 
         # --- Joint forward pass ---
         forward_inputs = dict(inputs)
@@ -1157,20 +1236,24 @@ class BaseWAMArchitecture(ABC, nn.Module):
         )
 
         # --- Video loss ---
-        loss_video = self._compute_video_loss(
-            video_noise_pred,
-            video_target,
-            video_timestep_ids,
-            inputs,
-            _device,
-        )
+        if video_mode == "clean" or lambda_video == 0:
+            loss_video = torch.zeros((), device=_device, dtype=torch.float32)
+        else:
+            loss_video = self._compute_video_loss(
+                video_noise_pred,
+                video_target,
+                video_timestep_ids,
+                inputs,
+                _device,
+            )
 
         if lambda_action == 0 or action_noise_pred is None:
-            return {
+            result = {
                 "loss": lambda_video * loss_video,
                 "loss_video": lambda_video * loss_video.detach(),
-                "loss_action": torch.tensor(0.0, device=loss_video.device),
+                "loss_action": torch.tensor(0.0, device=_device),
             }
+            return result
 
         # --- Action loss ---
         loss_action = self._compute_action_loss(
@@ -1182,16 +1265,26 @@ class BaseWAMArchitecture(ABC, nn.Module):
             _device,
         )
 
-        if lambda_video == 0:
+        if lambda_video == 0 or video_mode == "clean":
             loss = lambda_action * loss_action
         else:
             loss = lambda_video * loss_video + lambda_action * loss_action
 
         result = {
             "loss": loss,
-            "loss_video": lambda_video * loss_video.detach(),
+            "loss_video": (lambda_video * loss_video).detach()
+            if isinstance(loss_video, torch.Tensor)
+            else torch.tensor(0.0, device=_device),
             "loss_action": lambda_action * loss_action.detach(),
         }
+
+        if return_details:
+            result["action_pred"] = action_noise_pred
+            result["action_target"] = action_target
+            result["action_timestep_ids"] = action_timestep_ids
+            result["action_gt_mse_per_sample"] = self._action_mse_per_sample(
+                action_noise_pred, action_target, inputs.get("action_is_pad")
+            )
 
         return result
 
@@ -1311,6 +1404,28 @@ class BaseWAMArchitecture(ABC, nn.Module):
         valid_count = valid_mask_f.sum(dim=1).clamp(min=1)
         per_sample = per_step.sum(dim=1) / valid_count
         return (per_sample * tw).mean()
+
+
+    @staticmethod
+    def _action_mse_per_sample(noise_pred, target, action_is_pad=None):
+        """Unweighted per-sample action MSE for FPD gate / diagnostics. Returns [B]."""
+        import torch.nn.functional as F
+
+        per_element = F.mse_loss(noise_pred.float(), target.float(), reduction="none")
+        if action_is_pad is None:
+            return per_element.mean(dim=(1, 2))
+
+        action_is_pad = action_is_pad.to(device=per_element.device, dtype=torch.bool)
+        valid_mask_f = (~action_is_pad).float()
+        if valid_mask_f.shape == per_element.shape:
+            weighted = per_element * valid_mask_f
+            return weighted.sum(dim=(1, 2)) / valid_mask_f.sum(dim=(1, 2)).clamp(min=1)
+        if valid_mask_f.ndim == 3:
+            valid_mask_f = (valid_mask_f > 0).any(dim=-1).float()
+        per_step = per_element.mean(dim=2) * valid_mask_f
+        valid_count = valid_mask_f.sum(dim=1).clamp(min=1)
+        return per_step.sum(dim=1) / valid_count
+
 
     # --- Inference: generation ---
 
@@ -1602,6 +1717,18 @@ class BaseWAMArchitecture(ABC, nn.Module):
             actions = normalizer.unnormalize(actions)
 
         return {"video": video_frames, "actions": actions}
+
+    def generate_batch(self, samples: list, **kwargs) -> dict:
+        """Batched joint denoising. Does not change ``generate()``.
+
+        ``samples`` are the active slots only (empty slots stay out of the
+        forward). Each sample carries an external T5 ``context`` / ``seq_lens``
+        plus its own condition frame. Denoising steps are shared; DiT velocity
+        skip is decided per sample. See ``batch_generate.generate_batch``.
+        """
+        from openwam.model.architectures.batch_generate import generate_batch as _generate_batch
+
+        return _generate_batch(self, samples, **kwargs)
 
     # --- §15: Classifier-Free Guidance helpers (inference-time) ---
 

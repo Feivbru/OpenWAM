@@ -42,6 +42,10 @@ training:
   # --- Loss weights ---
   lambda_video: 1.0               # Video flow-matching loss weight
   lambda_action: 1.0              # Action flow-matching loss weight
+  lambda_distill: 0.0             # FPD distill loss weight (0 = disabled unless fpd.enabled)
+  use_distill_gate: false         # FPD per-sample distill gate
+  # train = noisy video (default WAM); clean = GT video at σ≈0 endpoint (FPD teacher pretrain)
+  video_mode: train
 
   # --- Flow matching timestep range ---
   max_timestep_boundary: 1.0      # Upper bound (fraction of total timesteps)
@@ -61,6 +65,11 @@ training:
   # --- Data loading ---
   dataset_num_workers: 8          # DataLoader num_workers (0 = main process)
 
+# Flow Policy Distillation (optional; see configs/train_fpd_robotwin_full.yaml)
+fpd:
+  enabled: false
+  teacher_ckpt_path: null
+
 project:
   name: openwam
   output_dir: outputs/${now:%Y-%m-%d_%H-%M-%S}
@@ -69,3 +78,4 @@ project:
     project: openwam
     run_name: null
     entity: null
+    mode: offline                 # never sync to a remote wandb account by default

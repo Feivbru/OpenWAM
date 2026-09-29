@@ -16,6 +16,10 @@ freeze:
   - video_backbone.image_encoder
   - video_backbone.video_encoder
 
+# When true, also freeze video_backbone.dit (action DiT stays trainable).
+# In FPD mode this only affects the student; teacher is always fully frozen.
+freeze_video_dit: false
+
 architecture:
   framework: dual_system
   variant: joint_self_attn   # joint_self_attn | joint_cross_attn | idm

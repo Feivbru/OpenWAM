@@ -130,8 +130,11 @@ class WSPolicyClient:
         """Send one observation without retrying an ambiguous action request."""
         return self._roundtrip({**payload, "type": OBS}, reconnect=False)
 
-    def reset(self) -> dict:
-        return self._roundtrip({"type": RESET})
+    def reset(self, *, slot_id: int | None = None) -> dict:
+        msg = {"type": RESET}
+        if slot_id is not None:
+            msg["slot_id"] = int(slot_id)
+        return self._roundtrip(msg)
 
     def ping(self) -> dict:
         return self._roundtrip({"type": PING}, reconnect=False)

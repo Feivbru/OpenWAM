@@ -1,0 +1,4 @@
+监控 FPD 评估。当前拓扑（共置）: --infer-gpus 2 --sim-gpus 2,3 --n-sims 3
+即 GPU2=infer+3sim，GPU3=3sim，总 6 路。-n fpd_full_colocate_6
+Run: outputs/openwam_fpd_robotwin_full/2026-09-24_22-18-53
+异常时按同一拓扑重跑。不要动 GPU 0/1。

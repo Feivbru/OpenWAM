@@ -62,6 +62,8 @@ def load_from_checkpoint_dir(
     ckpt_dir: str,
     device: str = "cuda",
     ckpt_name: Optional[str] = None,
+    *,
+    skip_text_encoder: bool = False,
 ) -> Tuple[DictConfig, BaseWAMArchitecture]:
     """Load full model from a self-contained checkpoint directory.
 
@@ -161,6 +163,9 @@ def load_from_checkpoint_dir(
                 "Using self-contained VAE weights from checkpoint (clearing external vae_path=%r)",
                 prev_vae_path,
             )
+        if skip_text_encoder:
+            vb_cfg_dict["skip_text_encoder"] = True
+            logger.info("skip_text_encoder: video backbone will not construct UMT5")
         vb_params["_source"] = vb_cfg_dict
         vb_params["_ckpt_dir"] = ckpt_dir
     else:
@@ -181,6 +186,12 @@ def load_from_checkpoint_dir(
                 "No components or model_path in config; architecture __init__ will attempt to build from config."
             )
 
+    if skip_text_encoder and vb_components is None:
+        raise RuntimeError(
+            "skip_text_encoder requires a checkpoint with video_backbone.components. "
+            "This checkpoint has no component specs, so UMT5 cannot be skipped at construction."
+        )
+
     # tri_system: use VLM checkpoint saved in the checkpoint dir instead of
     # the external training-time path. The trainer copies the VLM directory
     # to ``<ckpt_dir>/vlm_backbone/`` so deploy is self-contained.
@@ -195,6 +206,8 @@ def load_from_checkpoint_dir(
             logger.info("Using self-contained VLM checkpoint from %s", vlm_dir)
 
     architecture = build_architecture(resolved_arch.registry_name, params)
+    if skip_text_encoder:
+        architecture._ignore_text_encoder_keys = True
     logger.info(
         "Architecture: %s (framework=%s variant=%s)",
         resolved_arch.registry_name,

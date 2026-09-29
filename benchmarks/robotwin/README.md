@@ -66,6 +66,10 @@ bash benchmarks/robotwin/multi_eval.sh -m demo_clean -n run1 \
 
 `benchmarks/robotwin/policy_config.yml` must match the checkpoint: `action_type: ee` + `state_dim: 20` (end-effector, the released checkpoints) or `action_type: qpos` + `state_dim: 14` (joint-space).
 
+### FastWAM-style in-process eval (optional)
+
+For a same-process policy+Sapien path (no WebSocket), see [`local_eval/README.md`](local_eval/README.md) and `scripts/robotwin_local.sh`. That stack keeps `action_type=ee` and uses `max_tasks_per_gpu=1`; it does not replace `batched_eval.sh`.
+
 <details>
 <summary><b>Notes & troubleshooting</b></summary>
 

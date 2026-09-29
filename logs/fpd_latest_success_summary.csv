@@ -1,0 +1,3 @@
+mode,tasks_done,tasks_partial,tasks_with_score,macro_avg_rate_pct
+demo_clean,50,0,50,94.18
+demo_randomized,50,0,50,93.90

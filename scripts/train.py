@@ -64,6 +64,12 @@ def _build_accelerator(cfg: DictConfig):
     torchrun has already initialised torch.distributed (``RANK``, ``WORLD_SIZE``,
     ``LOCAL_RANK`` are set); we construct the ``DeepSpeedPlugin`` from cfg.training
     so DeepSpeed is activated without ``accelerate launch``.
+
+    ZeRO-2 defaults to FastWAM's ``scripts/ds_configs/ds_zero2_config.json``
+    (``contiguous_gradients: false`` + 200MB buckets). Accelerate's bare
+    ``zero_stage=2`` otherwise inherits DeepSpeed's ``contiguous_gradients:
+    true``, which flattens multi-GiB FP32 grad partitions every step and
+    fragments VRAM until OOM.
     """
     import accelerate
 
@@ -71,17 +77,32 @@ def _build_accelerator(cfg: DictConfig):
     grad_accum = int(t.gradient_accumulation_steps)
     max_grad_norm = getattr(t, "max_grad_norm", None)
     mixed_precision = str(t.mixed_precision)
+    zero_stage = int(t.zero_stage)
+    offload = str(getattr(t, "offload_optimizer_device", "none") or "none")
     if os.environ.get("LOCAL_RANK", "0") == "0":
         logger.info("mixed_precision = %s (from cfg.training.mixed_precision)", mixed_precision)
 
-    plugin = accelerate.DeepSpeedPlugin(
-        zero_stage=int(t.zero_stage),
-        gradient_accumulation_steps=grad_accum,
+    ds_config = getattr(t, "deepspeed_config", None)
+    if ds_config is None and zero_stage == 2:
+        default_zero2 = PROJECT_ROOT / "scripts" / "ds_configs" / "ds_zero2_config.json"
+        if default_zero2.is_file():
+            ds_config = str(default_zero2)
+
+    plugin_kwargs = {
+        "gradient_accumulation_steps": grad_accum,
         # DeepSpeed clips internally with this value (the loop's clip_grad_norm_ only reads
         # back the norm under DeepSpeed); single source = training.max_grad_norm, 0.0 = off.
-        gradient_clipping=float(max_grad_norm) if max_grad_norm else 0.0,
-        offload_optimizer_device=str(t.offload_optimizer_device),
-    )
+        "gradient_clipping": float(max_grad_norm) if max_grad_norm else 0.0,
+        "offload_optimizer_device": offload,
+    }
+    if ds_config:
+        plugin_kwargs["hf_ds_config"] = str(ds_config)
+        if os.environ.get("LOCAL_RANK", "0") == "0":
+            logger.info("DeepSpeed config = %s", ds_config)
+    else:
+        plugin_kwargs["zero_stage"] = zero_stage
+
+    plugin = accelerate.DeepSpeedPlugin(**plugin_kwargs)
 
     return accelerate.Accelerator(
         gradient_accumulation_steps=grad_accum,
@@ -170,19 +191,61 @@ def main(cfg: DictConfig) -> None:
         # raised, the other ranks are still in mid-training collectives
         # (e.g. accelerate's RNG-state broadcast inside dataloader.__iter__),
         # and destroy will block forever waiting for them — masking the
-        # actual rank-0 exception. Mirror the alternate path's pre-destroy
-        # traceback print so the real error survives the deadlock.
+        # actual rank-0 exception. Dump traceback to a file FIRST so the
+        # real error survives even if stderr/tee is lost or NCCL hangs.
         import traceback as _tb
+        from datetime import datetime as _dt
+        from pathlib import Path as _Path
 
         rank = os.environ.get("RANK", os.environ.get("LOCAL_RANK", "?"))
-        sys.stderr.write(f"\n===== RANK {rank} EXCEPTION (pre-destroy) =====\n")
-        _tb.print_exc(file=sys.stderr)
+        tb_text = _tb.format_exc()
+        banner = f"===== RANK {rank} EXCEPTION (pre-destroy) =====\n"
+        sys.stderr.write("\n" + banner)
+        sys.stderr.write(tb_text)
         sys.stderr.flush()
         sys.stdout.flush()
-        raise
+
+        # Also dump CUDA memory + traceback to a durable crash file.
+        mem_lines = []
+        try:
+            import torch as _torch
+
+            if _torch.cuda.is_available():
+                for i in range(_torch.cuda.device_count()):
+                    alloc = _torch.cuda.memory_allocated(i) / (1024**3)
+                    reserved = _torch.cuda.memory_reserved(i) / (1024**3)
+                    peak = _torch.cuda.max_memory_allocated(i) / (1024**3)
+                    mem_lines.append(
+                        f"cuda:{i} allocated={alloc:.2f}GiB reserved={reserved:.2f}GiB peak_alloc={peak:.2f}GiB"
+                    )
+        except Exception as _mem_e:
+            mem_lines.append(f"cuda_mem_query_failed: {_mem_e}")
+
+        crash_dir = _Path("logs")
+        try:
+            crash_dir.mkdir(parents=True, exist_ok=True)
+            stamp = _dt.now().strftime("%Y%m%d_%H%M%S")
+            crash_path = crash_dir / f"crash_rank{rank}_{stamp}.txt"
+            crash_path.write_text(
+                banner
+                + "\n".join(mem_lines)
+                + "\n"
+                + tb_text
+                + "\n"
+                + f"cwd={os.getcwd()}\n"
+                + f"argv={sys.argv!r}\n"
+            )
+            sys.stderr.write(f"[crash] wrote {crash_path}\n")
+            sys.stderr.flush()
+        except Exception as _dump_e:
+            sys.stderr.write(f"[crash] failed to write crash file: {_dump_e}\n")
+            sys.stderr.flush()
+
+        # Hard-exit: calling destroy_process_group() here deadlocks when peer
+        # ranks are still inside NCCL collectives, leaving zombie GPU holders.
+        os._exit(1)
     finally:
-        # Avoid `destroy_process_group() was not called before program exit`
-        # warning on shutdown by tearing down the NCCL process group cleanly.
+        # Only reached on clean success (exception path os._exit above).
         import torch.distributed as dist
 
         if dist.is_available() and dist.is_initialized():

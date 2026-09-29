@@ -1,0 +1,84 @@
+# OpenWAM FPD on LIBERO — Alpha-Sim-LIBERO warm-start student + frozen teacher.
+# Real experiments: train teacher first (train_teacher_libero), then set
+# fpd.teacher_ckpt_path to that run dir (or pass TEACHER_CKPT to the launch script).
+#
+# Launch (2x GPU):
+#   CUDA_VISIBLE_DEVICES=2,3 TEACHER_CKPT=/path/to/teacher_run \
+#     bash scripts/train_fpd_libero.sh
+
+defaults:
+  - model: dual_system
+  - dataloader: libero
+  - _self_
+
+training:
+  debug: false
+  learning_rate: 5.0e-7
+  adam_betas: [0.9, 0.95]
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  num_epochs: null
+  max_steps: 10000
+  # Conservative vs RoboTwin Full (8): FPD keeps a frozen teacher DiT on each GPU
+  # and LIBERO has no T5 cache (online UMT5). Override to 1 for 2xH20 smoke.
+  batch_size: 4
+  gradient_accumulation_steps: 1
+
+  lr_scheduler: cosine
+  warmup_ratio: 0.05
+  lr_min_ratio: 0.01
+  action_lr: null
+  video_lr: null
+
+  mixed_precision: bf16
+  zero_stage: 2
+  offload_optimizer_device: none
+
+  use_gradient_checkpointing: false
+  use_gradient_checkpointing_offload: false
+  initialize_model_on_cpu: true
+
+  # 3-loss FPD
+  lambda_video: 0.01
+  lambda_action: 1.0
+  lambda_distill: 1.0
+  use_distill_gate: true
+
+  max_timestep_boundary: 1.0
+  min_timestep_boundary: 0.0
+
+  output_path: outputs/openwam_fpd_libero
+  save_steps: 10000
+  save_full_states_for_resume: false
+  keep_last_k_ckpts: 1
+
+  # Student warm-start from Alpha-Sim-LIBERO release
+  finetune_ckpt_path: assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-LIBERO
+  resume_ckpt_path: null
+
+  dataset_num_workers: 4
+
+model:
+  # Match teacher: keep student video DiT frozen under ZeRO-2+bf16 on LIBERO
+  # (unfrozen video DiT poisoned weights after step 1 in smoke).
+  freeze_video_dit: true
+  architecture:
+    mot_checkpoint_mixed_attn: true
+  video_backbone:
+    model_path: /data/zixian_guo/projects/haoming/project/Motus/pretrained_models/Wan2.2-TI2V-5B
+
+fpd:
+  enabled: true
+  # Placeholder; launch script overrides with TEACHER_CKPT.
+  teacher_ckpt_path: outputs/openwam_teacher_libero/PLACEHOLDER
+
+project:
+  name: openwam_fpd_libero
+  output_dir: outputs/${now:%Y-%m-%d_%H-%M-%S}_fpd_libero
+  seed: 42
+  wandb:
+    project: openwam
+    run_name: fpd_libero
+    entity: null
+    mode: online

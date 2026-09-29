@@ -186,6 +186,7 @@ def build_holder_from_components(
     model_path: str = None,
     *,
     skip_native_vae: bool = False,
+    skip_text_encoder: bool = False,
 ):
     """Build an empty component holder from specs. Weights are NOT
     loaded here (``load_checkpoint`` does that). Tokenizer resolves
@@ -200,6 +201,9 @@ def build_holder_from_components(
 
     for entry in components:
         if skip_native_vae and entry.get("attr") == "vae":
+            continue
+        if skip_text_encoder and entry.get("attr") == "text_encoder":
+            logger.info("skip_text_encoder: not instantiating %s", entry.get("model_class"))
             continue
         cls = _import_class(entry["model_class"])
         kwargs = entry.get("extra_kwargs", {}) or {}
@@ -218,7 +222,7 @@ def build_holder_from_components(
         holder.height_division_factor = holder.vae.upsampling_factor * 2
         holder.width_division_factor = holder.vae.upsampling_factor * 2
 
-    if tokenizer:
+    if tokenizer and not skip_text_encoder:
         tok = None
         subdir = tokenizer.get("subdir", "")
         if ckpt_dir and subdir and os.path.isdir(os.path.join(ckpt_dir, subdir)):
@@ -290,11 +294,12 @@ def build_holder(source, *, skip_native_vae: bool = False, **kw):
         if isinstance(vb_cfg, dict) and "components" in vb_cfg:
             return build_holder_from_components(
                 vb_cfg["components"],
-                tokenizer=vb_cfg.get("tokenizer"),
+                tokenizer=None if vb_cfg.get("skip_text_encoder") else vb_cfg.get("tokenizer"),
                 device=kw.get("device", "cpu"),
                 ckpt_dir=kw.get("ckpt_dir"),
                 model_path=vb_cfg.get("model_path"),
                 skip_native_vae=skip_native_vae,
+                skip_text_encoder=bool(vb_cfg.get("skip_text_encoder", False)),
             )
         model_path = vb_cfg.get("model_path") if isinstance(vb_cfg, dict) else getattr(vb_cfg, "model_path", None)
         if model_path is None:

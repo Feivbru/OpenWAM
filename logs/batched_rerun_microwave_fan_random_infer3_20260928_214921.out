@@ -1,0 +1,12 @@
+[batched_eval] WARNING: colocating infer+sim on GPU(s): 3
+[batched_eval] topology=split infer_gpus=3 sim_gpus=2,3 n_sims=3 width=6 modes=demo_randomized tasks=2 seed=0 logs=/data/zixian_guo/projects/haoming/project/PI/OpenWAM/logs/batched_eval_fpd_rerun_microwave_fan_random_infer3_skipfront_demo_randomized_20260928_214922
+[batched_eval]   infer[0] gpu=3 owns 2 sim GPU(s) -> n_slots=6
+[batched_eval] infer gpu 3: encoder :9203 (cpu)  inference :9202  n_slots=6 max_batch=2
+[batched_eval] all inference servers healthy
+[batched_eval] queue 2 jobs, skipped 0
+[batched_eval] 1/2 demo_randomized open_microwave -> sim_gpu 2 slot 0 (infer gpu 3 :9202)
+[batched_eval] 2/2 demo_randomized place_fan -> sim_gpu 2 slot 1 (infer gpu 3 :9202)
+[batched_eval] sim_gpu 2 slot 1 idle (2/2 dispatched)
+[batched_eval] sim_gpu 2 slot 0 idle (2/2 dispatched)
+[batched_eval] done. logs: /data/zixian_guo/projects/haoming/project/PI/OpenWAM/logs/batched_eval_fpd_rerun_microwave_fan_random_infer3_skipfront_demo_randomized_20260928_214922
+[batched_eval] stopping 4 processes

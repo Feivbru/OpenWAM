@@ -206,7 +206,7 @@ def test_prompt_wrap_matches_dataset_training_output():
     from openwam.dataloader.robotwin import _resolve_prompt
 
     base = "pick up the red bottle"
-    training_output = _resolve_prompt(
+    training_output, _instr_idx = _resolve_prompt(
         instructions={"episode0.json": {"seen": [base]}},
         ep_file="episode0.hdf5",
         split="val",  # deterministic: picks pool[0]

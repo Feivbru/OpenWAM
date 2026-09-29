@@ -1,0 +1,39 @@
+# @package _global_
+# FastWAM-style in-process RoboTwin eval for OpenWAM (no WebSocket batched server).
+
+ckpt: null
+gpu_id: 0
+
+EVALUATION:
+  robotwin_root: third_party/RoboTwin
+  policy_name: openwam_local_policy
+  task_name: null
+  task_config: demo_clean
+  instruction_type: unseen
+  eval_num_episodes: 100
+  output_dir: ./evaluate_results/robotwin_local/${now:%Y%m%d_%H%M%S}
+
+  device: cuda
+  deploy_config: configs/deploy.yaml
+  action_type: ee
+  send_state: true
+  state_dim: 20
+  # FPD ckpts omit UMT5; local policy encodes prompts on CPU.
+  skip_text_encoder: true
+  skip_get_obs_within_replan: true
+  eval_video_log: false
+
+MULTIRUN:
+  enabled: true
+  # Overridden at launch from CUDA_VISIBLE_DEVICES length when using robotwin_local.sh
+  num_gpus: 1
+  # OpenWAM FPD is large; keep 1 model per GPU.
+  max_tasks_per_gpu: 1
+  phases: both
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null

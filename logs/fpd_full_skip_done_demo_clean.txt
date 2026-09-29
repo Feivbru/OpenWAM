@@ -1,0 +1,22 @@
+# demo_clean tasks that already finished 100 episodes.
+# Incomplete runs (hanging_mug and anything still in progress when n=4 was stopped) are not listed.
+# demo_randomized is not listed; none of those runs have started.
+demo_clean:adjust_bottle
+demo_clean:beat_block_hammer
+demo_clean:blocks_ranking_rgb
+demo_clean:blocks_ranking_size
+demo_clean:click_alarmclock
+demo_clean:click_bell
+demo_clean:dump_bin_bigbin
+demo_clean:grab_roller
+demo_clean:handover_block
+demo_clean:handover_mic
+demo_clean:lift_pot
+demo_clean:move_can_pot
+demo_clean:move_pillbottle_pad
+demo_clean:move_playingcard_away
+demo_clean:move_stapler_pad
+demo_clean:open_laptop
+demo_clean:pick_dual_bottles
+demo_clean:place_a2b_left
+demo_clean:place_a2b_right

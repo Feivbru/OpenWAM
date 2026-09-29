@@ -86,7 +86,11 @@ def build_cosine_scheduler(optimizer, *, total_opt_steps: int, cfg, num_processe
 
 
 def init_wandb(cfg):
-    """Init a wandb run from cfg.project.wandb. Returns the run or None."""
+    """Init a wandb run from cfg.project.wandb. Returns the run or None.
+
+    Default ``mode`` is ``offline`` so runs never sync to a remote account unless
+    explicitly overridden (config or ``WANDB_MODE``).
+    """
     wandb_cfg = cfg.project.get("wandb", None)
     if wandb_cfg is None:
         return None
@@ -99,52 +103,73 @@ def init_wandb(cfg):
         logger.warning("wandb not installed, skipping wandb logging")
         return None
 
+    import os
+
     run_name = getattr(wandb_cfg, "run_name", None)
     entity = getattr(wandb_cfg, "entity", None)
+    mode = getattr(wandb_cfg, "mode", None) or os.environ.get("WANDB_MODE") or "offline"
+    # Force env so child libs / later wandb calls stay offline too.
+    os.environ["WANDB_MODE"] = str(mode)
     from omegaconf import OmegaConf
 
     run = wandb.init(
         project=project,
         name=run_name,
         entity=entity,
+        mode=mode,
         config=OmegaConf.to_container(cfg, resolve=True),
         resume="allow",
     )
-    logger.info("wandb initialized: %s/%s", project, run.name)
+    logger.info("wandb initialized (%s): %s/%s", mode, project, run.name)
     return run
 
 
 def reduce_step_metrics(accelerator, losses: dict, grad_norm) -> dict:
-    """Reduce loss/grad_norm across ranks (mean); single-process fast path."""
+    """Reduce loss/grad_norm across ranks (mean); single-process fast path.
+
+    Optional FPD keys (``distill``, ``distill_gate_frac``, ``student_minus_teacher``)
+    are reduced when present.
+    """
     loss = losses["total"]
 
     def _f(v):
         return v.item() if isinstance(v, torch.Tensor) else float(v)
 
+    extra_keys = [k for k in ("distill", "distill_gate_frac", "student_minus_teacher") if k in losses]
+    base_vals = [
+        loss.detach().float().item(),
+        _f(losses["video"]),
+        _f(losses["action"]),
+        grad_norm.item() if isinstance(grad_norm, torch.Tensor) else float(grad_norm),
+    ]
+    extra_vals = [_f(losses[k]) for k in extra_keys]
+
     if accelerator is not None and accelerator.num_processes > 1:
         local = torch.tensor(
-            [
-                loss.detach().float().item(),
-                _f(losses["video"]),
-                _f(losses["action"]),
-                grad_norm.item(),
-            ],
+            base_vals + extra_vals,
             device=loss.device,
             dtype=torch.float32,
         ).reshape(1, -1)
         g = accelerator.gather(local).mean(dim=0)
-        return {
+        out = {
             "loss_total": g[0].item(),
             "loss_video": g[1].item(),
             "loss_action": g[2].item(),
             "grad_norm": g[3].item(),
         }
-    return {
+        for i, k in enumerate(extra_keys):
+            out[f"loss_{k}" if k == "distill" else k] = g[4 + i].item()
+        return out
+
+    out = {
         "loss_total": loss.detach().item(),
         "loss_video": _f(losses["video"]),
         "loss_action": _f(losses["action"]),
-        "grad_norm": grad_norm.item(),
+        "grad_norm": base_vals[3],
     }
+    for k, v in zip(extra_keys, extra_vals):
+        out[f"loss_{k}" if k == "distill" else k] = v
+    return out
 
 
 def write_debug_loss_row(

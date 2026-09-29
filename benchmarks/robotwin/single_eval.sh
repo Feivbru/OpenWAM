@@ -38,7 +38,7 @@ ckpt_setting="${3:-openwam}"
 gpu_id="${4:-0}"
 port="${5:-${ROBOTWIN_PORT:-8848}}"
 host="${6:-${ROBOTWIN_POLICY_HOST:-127.0.0.1}}"
-seed="0"
+seed="${ROBOTWIN_SEED:-0}"
 
 # Fail fast: silently falling back to the current `python` (usually the OpenWAM
 # env) only surfaces much later as a SAPIEN/RoboTwin import error.
@@ -92,6 +92,19 @@ export CUDA_VISIBLE_DEVICES="${gpu_id}"
 # PYTHONPATH: RoboTwin modules + this directory (for openwam2robotwin_interface.py)
 export PYTHONPATH="${ROBOTWIN_PATH}:${SCRIPT_DIR}:${PYTHONPATH:-}"
 export MPLCONFIGDIR="${MPLCONFIGDIR:-${TMPDIR:-/tmp}/matplotlib}"
+
+# Headless H20/H200: Sapien needs the user-space NVIDIA Vulkan libs. Without
+# this, SapienRenderer() raises "failed to find a rendering device" and the
+# upstream eval loop retries forever.
+_vulkan_env="$(cd "${SCRIPT_DIR}/../../.." && pwd)/VulkanDrive/env_nvidia_vulkan.sh"
+[[ -f "${_vulkan_env}" ]] || { echo "[ERROR] Vulkan env not found: ${_vulkan_env}" >&2; exit 1; }
+# shellcheck disable=SC1090
+source "${_vulkan_env}"
+echo "[INFO] NVIDIA Vulkan: ${VK_ICD_FILENAMES}"
+# single_eval invokes the interpreter by absolute path, so conda's bin is not
+# on PATH. RoboTwin shells out to `ffmpeg` for episode video.
+export PATH="$(dirname "${robotwin_python}"):${PATH}"
+
 maybe_configure_sapien_egl
 
 cd "${ROBOTWIN_PATH}"

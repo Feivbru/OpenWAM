@@ -1,0 +1,76 @@
+# OpenWAM FPD teacher pretrain — Clean2Random warm-start.
+# Same as train_teacher_robotwin_full.yaml except ckpt paths.
+
+defaults:
+  - model: dual_system
+  - dataloader: robotwin
+  - _self_
+
+training:
+  debug: false
+  learning_rate: 5.0e-7
+  adam_betas: [0.9, 0.95]
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  num_epochs: null
+  max_steps: 5000
+  batch_size: 16
+  gradient_accumulation_steps: 1
+
+  lr_scheduler: cosine
+  warmup_ratio: 0.05
+  lr_min_ratio: 0.01
+  action_lr: null
+  video_lr: null
+
+  mixed_precision: bf16
+  # ZeRO-2, Adam on GPU (no CPU offload). OpenWAM loads FastWAM's
+  # scripts/ds_configs/ds_zero2_config.json when zero_stage=2
+  # (contiguous_gradients=false + 200MB buckets).
+  zero_stage: 2
+  offload_optimizer_device: none
+
+  use_gradient_checkpointing: false
+  use_gradient_checkpointing_offload: false
+  initialize_model_on_cpu: true
+
+  video_mode: clean
+  lambda_video: 0.0
+  lambda_action: 1.0
+  lambda_distill: 0.0
+  use_distill_gate: false
+
+  max_timestep_boundary: 1.0
+  min_timestep_boundary: 0.0
+
+  output_path: outputs/openwam_teacher_robotwin_clean2random
+  save_steps: 5000
+  save_full_states_for_resume: false
+  keep_last_k_ckpts: 1
+
+  finetune_ckpt_path: assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-RoboTwin-Clean2Random
+  resume_ckpt_path: null
+
+  dataset_num_workers: 4
+
+dataloader:
+  use_t5_cache: true
+
+model:
+  freeze_video_dit: true
+  video_backbone:
+    model_path: /data/zixian_guo/projects/haoming/project/Motus/pretrained_models/Wan2.2-TI2V-5B
+
+fpd:
+  enabled: false
+
+project:
+  name: openwam_teacher_robotwin_clean2random
+  output_dir: outputs/${now:%Y-%m-%d_%H-%M-%S}_teacher_c2r
+  seed: 42
+  wandb:
+    project: openwam
+    run_name: teacher_robotwin_clean2random
+    entity: null
+    mode: offline
