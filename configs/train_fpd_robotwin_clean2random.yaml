@@ -1,5 +1,10 @@
-# OpenWAM FPD on RoboTwin — Clean2Random open-source warm-start.
-# Same as train_fpd_robotwin_full.yaml except ckpt paths.
+# OpenWAM FPD on RoboTwin — Clean2Random warm-start student + frozen teacher.
+# Same hyperparams as train_fpd_robotwin_full.yaml; only ckpt / names differ.
+#
+# Launch (2x GPU):
+#   CUDA_VISIBLE_DEVICES=6,7 VARIANT=c2r NPROC=2 CONDA_ENV=openwam_re \
+#     TEACHER_CKPT=outputs/openwam_teacher_robotwin_clean2random/2026-10-02_21-29-18 \
+#     bash scripts/train_fpd_robotwin.sh
 
 defaults:
   - model: dual_system
@@ -15,7 +20,7 @@ training:
 
   num_epochs: null
   max_steps: 10000
-  batch_size: 4
+  batch_size: 8
   gradient_accumulation_steps: 1
 
   lr_scheduler: cosine
@@ -26,12 +31,15 @@ training:
 
   mixed_precision: bf16
   zero_stage: 2
-
-  use_gradient_checkpointing: true
-  use_gradient_checkpointing_offload: false
-  initialize_model_on_cpu: true
   offload_optimizer_device: none
 
+  use_gradient_checkpointing: false
+  use_gradient_checkpointing_offload: false
+  initialize_model_on_cpu: true
+  # FPD keeps a full frozen teacher DiT on each GPU; offload Adam states to CPU
+  # so per-GPU batch_size=1 fits on H20 96G (OOM was at optimizer.step).
+
+  # 3-loss FPD
   lambda_video: 0.01
   lambda_action: 1.0
   lambda_distill: 1.0
@@ -41,10 +49,11 @@ training:
   min_timestep_boundary: 0.0
 
   output_path: outputs/openwam_fpd_robotwin_clean2random
-  save_steps: 2000
+  save_steps: 10000
   save_full_states_for_resume: false
   keep_last_k_ckpts: 1
 
+  # Student warm-start from Clean2Random open-source release
   finetune_ckpt_path: assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-RoboTwin-Clean2Random
   resume_ckpt_path: null
 
@@ -54,14 +63,17 @@ dataloader:
   use_t5_cache: true
 
 model:
-  freeze_video_dit: true
+  # Same as Full FPD: train student video DiT + action.
+  freeze_video_dit: false
+  architecture:
+    mot_checkpoint_mixed_attn: true
   video_backbone:
     model_path: /data/zixian_guo/projects/haoming/project/Motus/pretrained_models/Wan2.2-TI2V-5B
 
 fpd:
   enabled: true
-  # Override via TEACHER_CKPT / script; placeholder until a c2r teacher exists.
-  teacher_ckpt_path: assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Sim-RoboTwin-Clean2Random
+  # Trained C2R teacher (override via TEACHER_CKPT / script).
+  teacher_ckpt_path: outputs/openwam_teacher_robotwin_clean2random/2026-10-02_21-29-18
 
 project:
   name: openwam_fpd_robotwin_clean2random

@@ -1,5 +1,9 @@
 # OpenWAM FPD teacher pretrain — Clean2Random warm-start.
-# Same as train_teacher_robotwin_full.yaml except ckpt paths.
+# Same hyperparams as train_teacher_robotwin_full.yaml; only ckpt / names differ.
+#
+# Launch (6x GPU):
+#   CUDA_VISIBLE_DEVICES=2,3,4,5,6,7 VARIANT=c2r NPROC=6 \
+#     bash scripts/train_teacher_robotwin.sh
 
 defaults:
   - model: dual_system
@@ -14,7 +18,7 @@ training:
   max_grad_norm: 1.0
 
   num_epochs: null
-  max_steps: 5000
+  max_steps: 2000
   batch_size: 16
   gradient_accumulation_steps: 1
 
@@ -31,10 +35,12 @@ training:
   zero_stage: 2
   offload_optimizer_device: none
 
+  # Match Full teacher: outer ckpt off; mot mixed-attn ckpt on via model.
   use_gradient_checkpointing: false
   use_gradient_checkpointing_offload: false
   initialize_model_on_cpu: true
 
+  # Teacher pretrain: clean video + action only (FastWAM VLA-style)
   video_mode: clean
   lambda_video: 0.0
   lambda_action: 1.0
@@ -58,7 +64,10 @@ dataloader:
   use_t5_cache: true
 
 model:
-  freeze_video_dit: true
+  # Same as Full teacher: train video DiT + action.
+  freeze_video_dit: false
+  architecture:
+    mot_checkpoint_mixed_attn: true
   video_backbone:
     model_path: /data/zixian_guo/projects/haoming/project/Motus/pretrained_models/Wan2.2-TI2V-5B
 
@@ -73,4 +82,4 @@ project:
     project: openwam
     run_name: teacher_robotwin_clean2random
     entity: null
-    mode: offline
+    mode: online

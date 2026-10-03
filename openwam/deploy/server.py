@@ -522,6 +522,28 @@ def _build_argparser() -> argparse.ArgumentParser:
         help="Override inference.inference_delay_steps (async only).",
     )
     parser.add_argument(
+        "--protocol",
+        type=str,
+        choices=("openwam", "openpi"),
+        default="openwam",
+        help="Wire protocol: 'openwam' (JSON images/action) or 'openpi' "
+        "(msgpack EEF10 for Piper / openpi-client WebsocketClientPolicy).",
+    )
+    parser.add_argument(
+        "--max-delay",
+        type=int,
+        default=None,
+        dest="max_delay",
+        help="OpenPI Piper RTC: max_delay advertised in metadata (requires --protocol openpi).",
+    )
+    parser.add_argument(
+        "--training-rtc",
+        action="store_true",
+        default=False,
+        dest="training_rtc",
+        help="OpenPI Piper: advertise training_rtc=true + max_delay in metadata.",
+    )
+    parser.add_argument(
         "overrides",
         nargs="*",
         help="Additional OmegaConf dotlist overrides, e.g. model/video_backbone=cosmos_predict25_2b",
@@ -657,7 +679,15 @@ def main(argv: Optional[list[str]] = None):
 
     server_cfg = getattr(cfg, "server", None)
     host = args.host or getattr(server_cfg, "host", "0.0.0.0")
-    port = args.port or getattr(server_cfg, "port", 8848)
+    # OpenPI Piper clients commonly use port 8000; keep yaml/CLI override.
+    default_port = 8000 if args.protocol == "openpi" else 8848
+    port = args.port or getattr(server_cfg, "port", default_port)
+    if args.protocol == "openpi" and args.port is None and getattr(server_cfg, "port", None) is None:
+        # Prefer piper_openpi.port when set in yaml.
+        piper_port = OmegaConf.select(cfg, "piper_openpi.port", default=None)
+        if piper_port is not None:
+            port = int(piper_port)
+
     server = build_server_from_config(
         cfg=cfg,
         ckpt_dir=ckpt_dir,
@@ -665,11 +695,27 @@ def main(argv: Optional[list[str]] = None):
         ckpt_name=args.ckpt_name,
     )
     logging.getLogger("deploy").info(
-        "Inference engine ready — steps=%d denoise_mode=%s",
+        "Inference engine ready — protocol=%s steps=%d denoise_mode=%s",
+        args.protocol,
         OmegaConf.select(server.cfg, "inference.denoise_steps", default=20),
         OmegaConf.select(server.cfg, "inference.denoise_mode", default="sync"),
     )
-    server.run(host=host, port=port)
+    if args.protocol == "openpi":
+        from openwam.deploy.openpi_piper_server import build_openpi_piper_server
+
+        openpi_server = build_openpi_piper_server(
+            server.engine,
+            server.cfg,
+            host=host,
+            port=int(port),
+            max_delay=args.max_delay,
+            training_rtc=bool(args.training_rtc) or None,
+        )
+        openpi_server.run()
+    else:
+        if args.max_delay is not None or args.training_rtc:
+            parser.error("--max-delay / --training-rtc require --protocol openpi")
+        server.run(host=host, port=port)
 
 
 if __name__ == "__main__":

@@ -330,7 +330,6 @@ class RoboTwinDataset(BaseDataset):
         self.use_t5_cache = bool(use_t5_cache)
         self.t5_cache_dirname = str(t5_cache_dirname or "umt5_openwam")
         self.t5_top_k = int(t5_top_k)
-        self._t5_cache_files: dict[int, dict] = {}
         self._unify_action = bool(unify_action)
         self._unify_action_map = unify_action_map
         if unify_state_map is not None and list(unify_state_map) != list(self._unify_action_map or ()):
@@ -744,47 +743,56 @@ class RoboTwinDataset(BaseDataset):
         )
 
     def _load_t5_context(self, ep_idx: int, instr_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Load cached UMT5 context for ``seen[instr_idx]`` of episode *ep_idx*."""
+        """Load one cached UMT5 context for ``seen[instr_idx]`` of episode *ep_idx*.
+
+        Loads the episode ``.pt``, copies out the single requested context, then
+        drops the payload. Do not retain whole-episode dicts in-process: RoboTwin
+        has ~27k episodes × ~4MB each and workers OOMed after enough uniques.
+        """
         path = self._episode_files[ep_idx]
         ep_basename = os.path.basename(path)
         ep_num = int(ep_basename.replace("episode", "").replace(".hdf5", ""))
-        if ep_num not in self._t5_cache_files:
-            cache_path = os.path.join(
-                os.path.dirname(self.data_root),
-                self.t5_cache_dirname,
-                f"episode{ep_num}.pt",
+        cache_path = os.path.join(
+            os.path.dirname(self.data_root),
+            self.t5_cache_dirname,
+            f"episode{ep_num}.pt",
+        )
+        if not os.path.isfile(cache_path):
+            raise FileNotFoundError(
+                f"use_t5_cache=true but missing T5 cache file: {cache_path}"
             )
-            if not os.path.isfile(cache_path):
-                raise FileNotFoundError(
-                    f"use_t5_cache=true but missing T5 cache file: {cache_path}"
+        payload = torch.load(cache_path, map_location="cpu", weights_only=False)
+        try:
+            contexts = payload["contexts"]
+            seq_lens = payload["seq_lens"]
+            if instr_idx < 0 or instr_idx >= len(contexts):
+                raise IndexError(
+                    f"T5 cache instr_idx={instr_idx} out of range for episode{ep_num} "
+                    f"(n={len(contexts)})"
                 )
-            self._t5_cache_files[ep_num] = torch.load(cache_path, map_location="cpu", weights_only=False)
-        payload = self._t5_cache_files[ep_num]
-        contexts = payload["contexts"]
-        seq_lens = payload["seq_lens"]
-        if instr_idx < 0 or instr_idx >= len(contexts):
-            raise IndexError(
-                f"T5 cache instr_idx={instr_idx} out of range for episode{ep_num} "
-                f"(n={len(contexts)})"
-            )
-        ctx = contexts[instr_idx]
-        if not isinstance(ctx, torch.Tensor):
-            ctx = torch.as_tensor(ctx)
-        ctx = ctx.detach().to(dtype=torch.bfloat16, device="cpu").contiguous()
-        if isinstance(seq_lens, torch.Tensor):
-            L = int(seq_lens[instr_idx].item())
-        else:
-            L = int(seq_lens[instr_idx])
-        if ctx.ndim != 2 or ctx.shape[0] != L:
-            # Tolerate full-padded caches by truncating to declared length.
-            if ctx.ndim == 2 and ctx.shape[0] >= L:
-                ctx = ctx[:L].contiguous()
+            ctx = contexts[instr_idx]
+            if not isinstance(ctx, torch.Tensor):
+                ctx = torch.as_tensor(ctx)
             else:
-                raise ValueError(
-                    f"episode{ep_num} instr{instr_idx}: context shape {tuple(ctx.shape)} "
-                    f"incompatible with seq_len={L}"
-                )
-        return ctx, torch.tensor(L, dtype=torch.long)
+                ctx = ctx.detach().clone()
+            ctx = ctx.to(dtype=torch.bfloat16, device="cpu").contiguous()
+            if isinstance(seq_lens, torch.Tensor):
+                L = int(seq_lens[instr_idx].item())
+            else:
+                L = int(seq_lens[instr_idx])
+            if ctx.ndim != 2 or ctx.shape[0] != L:
+                # Tolerate full-padded caches by truncating to declared length.
+                if ctx.ndim == 2 and ctx.shape[0] >= L:
+                    ctx = ctx[:L].contiguous()
+                else:
+                    raise ValueError(
+                        f"episode{ep_num} instr{instr_idx}: context shape {tuple(ctx.shape)} "
+                        f"incompatible with seq_len={L}"
+                    )
+            return ctx, torch.tensor(L, dtype=torch.long)
+        finally:
+            # Drop the full 10-instr payload immediately; only ``ctx`` is retained.
+            del payload
 
     def _read_eef_actions(self, f, start: int, end: int) -> np.ndarray:
         """Read endpose keys and assemble 20D EEF action vector.

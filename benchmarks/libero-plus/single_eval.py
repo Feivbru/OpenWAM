@@ -171,6 +171,7 @@ def run_eval(cfg: dict) -> int:
         action_dim=7,
         action_indices=cfg.get("action_indices"),
         action_clip=cfg.get("action_clip"),
+        action_chunk_mode=str(cfg.get("action_chunk_mode", "all")),
         debug=_require_bool(cfg.get("debug", False), "debug"),
         debug_dir=cfg.get("debug_dir", "./debug_libero"),
     )

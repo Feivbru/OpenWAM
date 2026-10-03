@@ -69,16 +69,19 @@ class _BoundedPromptEmbedCache(OrderedDict):
         self._evict_warned = False
 
     def __getitem__(self, key: Any) -> Any:
-        value = super().__getitem__(key)
+        # Avoid super()/popitem on OrderedDict subclasses: CPython's
+        # OrderedDict.popitem can re-enter __getitem__ mid-eviction and KeyError.
+        value = OrderedDict.__getitem__(self, key)
         self.move_to_end(key)
         return value
 
     def __setitem__(self, key: Any, value: Any) -> None:
         if key in self:
             self.move_to_end(key)
-        super().__setitem__(key, value)
+        OrderedDict.__setitem__(self, key, value)
         while len(self) > self._maxsize:
-            evicted_key, _ = self.popitem(last=False)
+            evicted_key = next(iter(self))
+            OrderedDict.__delitem__(self, evicted_key)
             if not self._evict_warned:
                 self._evict_warned = True
                 logger.warning("prompt_embed_cache exceeded maxsize=%d; evicted %r", self._maxsize, evicted_key)

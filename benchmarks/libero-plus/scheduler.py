@@ -46,7 +46,12 @@ LIBERO_PROTOCOL_VERSION = "openwam-libero-plus-native-action-seed10000-settle30-
 
 # Scheduling-only fields may change across a checkpointed evaluation. They do
 # not alter simulator state, observations, policy settings, or task selection.
-RESUME_OPERATIONAL_FIELDS = frozenset({"render_gpus"})
+RESUME_OPERATIONAL_FIELDS = frozenset({"render_gpus", "server_backend", "n_sims", "max_infer_batch"})
+
+DEFAULT_WAN_PATH = Path(
+    "/data/zixian_guo/projects/haoming/project/Motus/pretrained_models/Wan2.2-TI2V-5B"
+)
+ROBOTWIN_DIR = REPO_ROOT / "benchmarks" / "robotwin"
 
 SUITE_ALIASES = {
     "spatial": "libero_spatial",
@@ -101,6 +106,8 @@ class ReplicaSlot:
     gpu_slot: int
     replica: int
     port: int
+    # Batched 1-infer:N-sim topology sets this explicitly; legacy leaves it None.
+    render_gpu: int | None = None
 
 
 @dataclass(frozen=True)
@@ -268,8 +275,92 @@ def _build_replica_slots(gpus: list[int], base_port: int, replicas_per_gpu: int 
     ]
 
 
+def _batched_infer_port(base_port: int, gpu_slot: int) -> int:
+    """One infer WS port per group; encoder uses port+1 (RoboTwin convention)."""
+    return base_port + 10 * gpu_slot
+
+
+def _partition_sim_gpus(infer_gpus: list[int], sim_gpus: list[int]) -> list[list[int]]:
+    """Evenly partition sim GPUs across infer GPUs (contiguous chunks)."""
+    n_infer = len(infer_gpus)
+    n_sim = len(sim_gpus)
+    if n_infer < 1 or n_sim < 1:
+        raise ValueError("batched mode needs at least one infer GPU and one sim GPU")
+    base = n_sim // n_infer
+    rem = n_sim % n_infer
+    owned: list[list[int]] = []
+    cursor = 0
+    for i in range(n_infer):
+        cnt = base + (1 if i < rem else 0)
+        if cnt < 1:
+            raise ValueError(
+                f"too many infer GPUs ({n_infer}) for {n_sim} sim GPU(s); "
+                "each infer needs >=1 sim GPU"
+            )
+        owned.append(list(sim_gpus[cursor : cursor + cnt]))
+        cursor += cnt
+    return owned
+
+
+def _build_batched_slots(
+    infer_gpus: list[int],
+    sim_gpus: list[int],
+    base_port: int,
+    n_sims: int,
+) -> list[ReplicaSlot]:
+    """1 infer server owns many sim GPUs × n_sims processes (RoboTwin fan-out)."""
+    if n_sims < 1:
+        raise ValueError("--n-sims must be >= 1")
+    owned = _partition_sim_gpus(infer_gpus, sim_gpus)
+    slots: list[ReplicaSlot] = []
+    for gpu_slot, infer_gpu in enumerate(infer_gpus):
+        port = _batched_infer_port(base_port, gpu_slot)
+        replica = 0
+        for sim_gpu in owned[gpu_slot]:
+            for _ in range(n_sims):
+                slots.append(
+                    ReplicaSlot(
+                        gpu=infer_gpu,
+                        gpu_slot=gpu_slot,
+                        replica=replica,
+                        port=port,
+                        render_gpu=sim_gpu,
+                    )
+                )
+                replica += 1
+        if replica < 1:
+            raise ValueError(f"infer gpu {infer_gpu} was assigned 0 sim slots")
+    return slots
+
+
+def _normalize_batched_topology(args: argparse.Namespace) -> None:
+    """Map infer/sim GPU lists onto gpus/render_gpus; allow 1 infer : N sim."""
+    infer = args.infer_gpus if args.infer_gpus is not None else args.gpus
+    sim = args.sim_gpus if args.sim_gpus is not None else args.render_gpus
+    if sim is None:
+        raise ValueError("batched mode requires --sim-gpus or --render-gpus (disjoint from infer)")
+    overlap = sorted(set(infer) & set(sim))
+    if overlap:
+        raise ValueError(f"infer and sim GPUs must be disjoint; overlap={overlap}")
+    if args.n_sims < 1:
+        raise ValueError("--n-sims must be >= 1")
+    if args.max_infer_batch < 0:
+        raise ValueError("--max-infer-batch must be >= 0")
+    # Validate partition up front.
+    owned = _partition_sim_gpus(list(infer), list(sim))
+    args.gpus = list(infer)
+    args.render_gpus = list(sim)
+    args.infer_gpus = list(infer)
+    args.sim_gpus = list(sim)
+    args._batched_owned_sims = owned  # noqa: SLF001 — stash for plan printing
+    # Total client workers / infer for logging compatibility.
+    args.replicas_per_gpu = max(len(chunk) * int(args.n_sims) for chunk in owned)
+
+
 def _render_device_for_slot(args: argparse.Namespace, slot: ReplicaSlot) -> int:
     """Choose an EGL device independently of the policy-server CUDA device."""
+    if slot.render_gpu is not None:
+        return int(slot.render_gpu)
     render_gpus = args.render_gpus if args.render_gpus is not None else args.gpus
     return render_gpus[slot.gpu_slot % len(render_gpus)]
 
@@ -315,6 +406,7 @@ def _client_env(
     libero_path: Path,
     config_root: Path,
     render_gpu: int,
+    libero_slot: int | None = None,
 ) -> dict[str, str]:
     env = dict(base_env)
     old_pythonpath = env.get("PYTHONPATH", "")
@@ -337,6 +429,10 @@ def _client_env(
             "PYTHONUNBUFFERED": "1",
         }
     )
+    if libero_slot is not None:
+        env["LIBERO_SLOT"] = str(int(libero_slot))
+    else:
+        env.pop("LIBERO_SLOT", None)
     return env
 
 
@@ -637,6 +733,7 @@ def _run_client(
         libero_path=args.libero_path,
         config_root=config_root,
         render_gpu=_render_device_for_slot(args, slot),
+        libero_slot=slot.replica if getattr(args, "server_backend", "legacy") == "batched" else None,
     )
     process = subprocess.Popen(
         command,
@@ -901,6 +998,135 @@ def _start_servers(
     return servers
 
 
+def _encoder_command(args: argparse.Namespace, encoder_port: int) -> list[str]:
+    return [
+        str(args.server_python),
+        str(ROBOTWIN_DIR / "encoder_server.py"),
+        "--host",
+        args.host,
+        "--port",
+        str(encoder_port),
+        "--ckpt-dir",
+        str(args.ckpt_dir),
+        "--wan-path",
+        str(args.wan_path),
+        "--device",
+        args.encoder_device,
+    ]
+
+
+def _batched_server_command(args: argparse.Namespace, *, port: int, encoder_port: int, n_slots: int) -> list[str]:
+    command = [
+        str(args.server_python),
+        str(ROBOTWIN_DIR / "batched_server.py"),
+        "--ckpt-dir",
+        str(args.ckpt_dir),
+        "--ckpt-name",
+        args.ckpt_name,
+        "--device",
+        "cuda:0",
+        "--host",
+        args.host,
+        "--port",
+        str(port),
+        "--encoder-host",
+        args.host,
+        "--encoder-port",
+        str(encoder_port),
+        "--n-slots",
+        str(n_slots),
+        "--max-batch",
+        str(args.max_infer_batch),
+        "--denoise-steps",
+        str(args.denoise_steps),
+    ]
+    return command
+
+
+def _start_batched_servers(
+    args: argparse.Namespace,
+    *,
+    slots: list[ReplicaSlot],
+    output_dir: Path,
+    registry: ProcessRegistry,
+) -> list[ServerProcess]:
+    """One encoder + one batched_server per infer GPU; N sim workers share the WS port."""
+    server_dir = output_dir / "logs" / "servers"
+    server_dir.mkdir(parents=True, exist_ok=True)
+    groups: dict[int, list[ReplicaSlot]] = {}
+    for slot in slots:
+        groups.setdefault(slot.gpu_slot, []).append(slot)
+
+    servers: list[ServerProcess] = []
+    for gpu_slot, group_slots in sorted(groups.items()):
+        infer_gpu = group_slots[0].gpu
+        port = group_slots[0].port
+        encoder_port = port + 1
+        n_slots = len(group_slots)
+        if any(slot.port != port or slot.gpu != infer_gpu for slot in group_slots):
+            raise RuntimeError(f"inconsistent batched slots for gpu_slot={gpu_slot}: {group_slots}")
+
+        enc_cmd = _encoder_command(args, encoder_port)
+        enc_log = server_dir / f"encoder_gpu{infer_gpu}_port{encoder_port}.log"
+        enc_handle = enc_log.open("w", encoding="utf-8")
+        enc_handle.write(f"command: {shlex.join(enc_cmd)}\n")
+        enc_handle.flush()
+        enc_env = dict(os.environ)
+        enc_env["PYTHONUNBUFFERED"] = "1"
+        if str(args.encoder_device).startswith("cpu"):
+            enc_env["CUDA_VISIBLE_DEVICES"] = ""
+        else:
+            enc_env["CUDA_VISIBLE_DEVICES"] = str(infer_gpu)
+        enc_proc = subprocess.Popen(
+            enc_cmd,
+            cwd=REPO_ROOT,
+            env=enc_env,
+            stdout=enc_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        registry.add(enc_proc)
+        print(
+            f"[encoder] gpu={infer_gpu} port={encoder_port} device={args.encoder_device} pid={enc_proc.pid}",
+            flush=True,
+        )
+
+        bat_cmd = _batched_server_command(args, port=port, encoder_port=encoder_port, n_slots=n_slots)
+        bat_log = server_dir / f"batched_gpu{infer_gpu}_port{port}.log"
+        bat_handle = bat_log.open("w", encoding="utf-8")
+        bat_handle.write(f"command: {shlex.join(bat_cmd)}\n")
+        bat_handle.flush()
+        bat_env = dict(os.environ)
+        bat_env.update(
+            {
+                "CUDA_VISIBLE_DEVICES": str(infer_gpu),
+                "PYTHONUNBUFFERED": "1",
+                "PYTORCH_CUDA_ALLOC_CONF": os.environ.get(
+                    "PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"
+                ),
+            }
+        )
+        bat_proc = subprocess.Popen(
+            bat_cmd,
+            cwd=REPO_ROOT,
+            env=bat_env,
+            stdout=bat_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        registry.add(bat_proc)
+        # Track the batched server as the "policy" endpoint for readiness checks.
+        servers.append(ServerProcess(infer_gpu, 0, port, bat_proc, bat_handle))
+        print(
+            f"[batched] gpu={infer_gpu} port={port} encoder_port={encoder_port} "
+            f"n_slots={n_slots} max_batch={args.max_infer_batch} pid={bat_proc.pid}",
+            flush=True,
+        )
+
+    _wait_for_servers(servers, args.host, args.server_start_timeout)
+    return servers
+
+
 def _read_result(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -1056,14 +1282,27 @@ def _preflight(args: argparse.Namespace) -> None:
         args.ckpt_dir / "config.yaml",
         args.ckpt_dir / "normalization_stats.npy",
         SCRIPT_DIR / "single_eval.py",
-        REPO_ROOT / "scripts" / "deploy.py",
     ]
+    if args.server_backend == "batched":
+        required_files.extend(
+            [
+                ROBOTWIN_DIR / "batched_server.py",
+                ROBOTWIN_DIR / "encoder_server.py",
+            ]
+        )
+    else:
+        required_files.append(REPO_ROOT / "scripts" / "deploy.py")
     missing = [str(path) for path in required_files if not path.is_file()]
     if not args.libero_path.is_dir():
         missing.append(str(args.libero_path))
+    if args.server_backend == "batched" and not Path(args.wan_path).is_dir():
+        missing.append(str(args.wan_path))
     if missing:
         raise FileNotFoundError("required paths are missing:\n  " + "\n  ".join(missing))
-    highest_port = args.base_port + args.replicas_per_gpu * len(args.gpus) - 1
+    if args.server_backend == "batched":
+        highest_port = args.base_port + 10 * (len(args.gpus) - 1) + 1
+    else:
+        highest_port = args.base_port + args.replicas_per_gpu * len(args.gpus) - 1
     if args.base_port <= 0 or highest_port > 65535:
         raise ValueError(f"invalid port range {args.base_port}..{highest_port}")
     if args.num_trials <= 0:
@@ -1138,9 +1377,24 @@ def _print_plan(
     print(f"trials     : {trial_run.trial_start}:{trial_run.trial_stop} continuous in one environment per task")
     print(f"scheduler  : dynamic shared queue ({len(pending_jobs)} pending request(s))")
     print(
-        f"servers    : {len(active_slots)} active replica(s) "
-        f"({len(args.gpus)} GPUs, up to {args.replicas_per_gpu} replicas each)"
+        f"servers    : {len(active_slots)} active worker(s) "
+        f"(backend={args.server_backend}, {len(args.gpus)} infer GPU(s)"
+        + (
+            f", sim_gpus={args.render_gpus}, n_sims/sim_gpu={args.n_sims}"
+            if args.server_backend == "batched"
+            else f", up to {args.replicas_per_gpu} replicas each"
+        )
+        + ")"
     )
+    if args.server_backend == "batched":
+        owned = getattr(args, "_batched_owned_sims", None)
+        if owned is not None:
+            for i, infer_gpu in enumerate(args.gpus):
+                print(
+                    f"  infer[{i}] gpu={infer_gpu} owns sim_gpus={owned[i]} "
+                    f"-> n_slots={len(owned[i]) * args.n_sims} "
+                    f"port={_batched_infer_port(args.base_port, i)}"
+                )
     for gpu in args.gpus:
         for slot in sorted(
             (slot for slot in slots if slot.gpu == gpu),
@@ -1164,11 +1418,52 @@ def _build_parser() -> argparse.ArgumentParser:
         help="physical EGL devices assigned by policy-GPU slot (default: same as --gpus)",
     )
     parser.add_argument(
+        "--infer-gpus",
+        type=_parse_gpus,
+        default=None,
+        help="batched mode: policy/DiT GPUs (default: --gpus)",
+    )
+    parser.add_argument(
+        "--sim-gpus",
+        type=_parse_gpus,
+        default=None,
+        help="batched mode: MuJoCo/EGL GPUs paired 1:1 with --infer-gpus (default: --render-gpus)",
+    )
+    parser.add_argument(
+        "--server-backend",
+        choices=("legacy", "batched"),
+        default="batched",
+        help="legacy=1 deploy.py per worker; batched=1 batched_server + encoder per infer GPU",
+    )
+    parser.add_argument(
+        "--n-sims",
+        type=int,
+        default=4,
+        help="batched mode: sim processes per infer GPU (default: 4)",
+    )
+    parser.add_argument(
+        "--max-infer-batch",
+        type=int,
+        default=2,
+        help="batched mode: max slots per generate_batch (default: 2; 0=all ready)",
+    )
+    parser.add_argument(
+        "--encoder-device",
+        default="cuda:0",
+        help="batched mode: UMT5 encoder device (default: cuda:0 on the infer GPU)",
+    )
+    parser.add_argument(
+        "--wan-path",
+        type=Path,
+        default=DEFAULT_WAN_PATH,
+        help="batched mode: Wan/UMT5 weights directory for encoder_server",
+    )
+    parser.add_argument(
         "--replicas-per-gpu",
         type=int,
         choices=(1, 2, 3),
         default=2,
-        help="policy server/client replicas per GPU (default: 2; maximum: 3)",
+        help="legacy backend only: policy server/client replicas per GPU (default: 2; maximum: 3)",
     )
     parser.add_argument("--base-port", type=int, default=8920)
     parser.add_argument("--host", default="127.0.0.1")
@@ -1267,11 +1562,14 @@ def main(argv: list[str] | None = None) -> int:
         args.num_trials = 1
     args.ckpt_dir = args.ckpt_dir.expanduser().resolve()
     args.server_python = args.server_python.expanduser().resolve()
+    args.wan_path = args.wan_path.expanduser().resolve()
     # Preserve the public default aliases in logs and manifests instead of
     # exposing an implementation-specific physical environment directory.
     args.libero_python = args.libero_python.expanduser().absolute()
     args.libero_path = args.libero_path.expanduser().absolute()
     args.policy_config = args.policy_config.expanduser().resolve()
+    if args.server_backend == "batched":
+        _normalize_batched_topology(args)
     _preflight(args)
     _validate_protocol(args)
     mujoco_version = _mujoco_version(args.libero_python)
@@ -1318,7 +1616,10 @@ def main(argv: list[str] | None = None) -> int:
                 f"rebalancing {len(assignment_jobs)} unfinished task(s)",
                 flush=True,
             )
-    slots = _build_replica_slots(args.gpus, args.base_port, args.replicas_per_gpu)
+    if args.server_backend == "batched":
+        slots = _build_batched_slots(args.gpus, args.render_gpus, args.base_port, args.n_sims)
+    else:
+        slots = _build_replica_slots(args.gpus, args.base_port, args.replicas_per_gpu)
     pull_order = sorted(slots, key=lambda slot: (slot.replica, slot.gpu_slot))
     active_slots = pull_order[: min(len(pull_order), len(assignment_jobs))]
     _print_plan(args, jobs, assignment_jobs, slots, active_slots, trial_run, mujoco_version)
@@ -1338,6 +1639,11 @@ def main(argv: list[str] | None = None) -> int:
         "checkpoint": str(args.ckpt_dir / args.ckpt_name),
         "created_at": datetime.now().isoformat(),
         "server_mode": args.server_mode,
+        "server_backend": args.server_backend,
+        "n_sims": args.n_sims if args.server_backend == "batched" else None,
+        "max_infer_batch": args.max_infer_batch if args.server_backend == "batched" else None,
+        "encoder_device": args.encoder_device if args.server_backend == "batched" else None,
+        "wan_path": str(args.wan_path) if args.server_backend == "batched" else None,
         "inference_mode": args.inference_mode,
         "inference_horizon": args.inference_horizon,
         "denoise_mode": args.denoise_mode,
@@ -1391,7 +1697,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"output          {output_dir}")
         return 0 if complete else 1
 
-    ports = [slot.port for slot in active_slots]
+    # Batched: many workers share one port — unique for occupancy checks.
+    ports = sorted({slot.port for slot in active_slots})
     occupied = [port for port in ports if _port_is_open(args.host, port)]
     if args.server_mode == "managed" and occupied:
         raise RuntimeError(f"managed-server ports are already occupied: {occupied}")
@@ -1414,12 +1721,23 @@ def main(argv: list[str] | None = None) -> int:
     futures: list[concurrent.futures.Future] = []
     try:
         if args.server_mode == "managed":
-            servers = _start_servers(
-                args,
-                slots=active_slots,
-                output_dir=output_dir,
-                registry=registry,
-            )
+            if args.server_backend == "batched":
+                # Start servers for all slots that share ports with active workers.
+                active_ports = {slot.port for slot in active_slots}
+                server_slots = [slot for slot in slots if slot.port in active_ports]
+                servers = _start_batched_servers(
+                    args,
+                    slots=server_slots,
+                    output_dir=output_dir,
+                    registry=registry,
+                )
+            else:
+                servers = _start_servers(
+                    args,
+                    slots=active_slots,
+                    output_dir=output_dir,
+                    registry=registry,
+                )
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(active_slots))
         futures = [
             executor.submit(

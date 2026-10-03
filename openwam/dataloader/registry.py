@@ -75,6 +75,7 @@ def list_registered_datasets():
 def _register_builtins():
     """Register all built-in dataset classes."""
     from openwam.dataloader.agibotworld import MultiAgiBotWorldDataset
+    from openwam.dataloader.banana_piper import BananaPiperDataset
     from openwam.dataloader.ebench import EBenchDataset
     from openwam.dataloader.interndata_a1 import InternDataA1Dataset
     from openwam.dataloader.libero import LiberoDataset
@@ -97,6 +98,7 @@ def _register_builtins():
     register_dataset("ebench")(EBenchDataset)
     register_dataset("libero")(LiberoDataset)
     register_dataset("muka_franka")(MukaFrankaDataset)
+    register_dataset("banana_piper")(BananaPiperDataset)
     register_dataset("oxe_droid")(OxeDroidDataset)
     register_dataset("robocasa365")(MultiTaskRoboCasa365Dataset)
     # Registered on the SINGLE-bucket class: its from_config returns either one

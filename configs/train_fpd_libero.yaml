@@ -19,10 +19,10 @@ training:
   max_grad_norm: 1.0
 
   num_epochs: null
-  max_steps: 10000
-  # Conservative vs RoboTwin Full (8): FPD keeps a frozen teacher DiT on each GPU
-  # and LIBERO has no T5 cache (online UMT5). Override to 1 for 2xH20 smoke.
-  batch_size: 4
+  max_steps: 3500
+  # Conservative vs RoboTwin Full (8): FPD keeps a frozen teacher DiT on each GPU.
+  # With use_t5_cache, UMT5 is skipped (disk embeds). Override to 1 for smoke.
+  batch_size: 16
   gradient_accumulation_steps: 1
 
   lr_scheduler: cosine
@@ -59,10 +59,12 @@ training:
 
   dataset_num_workers: 4
 
+dataloader:
+  use_t5_cache: true
+
 model:
-  # Match teacher: keep student video DiT frozen under ZeRO-2+bf16 on LIBERO
-  # (unfrozen video DiT poisoned weights after step 1 in smoke).
-  freeze_video_dit: true
+  # Train student video DiT + action (same as RoboTwin Full FPD).
+  freeze_video_dit: false
   architecture:
     mot_checkpoint_mixed_attn: true
   video_backbone:

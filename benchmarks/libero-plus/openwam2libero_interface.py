@@ -13,6 +13,8 @@ server is achieved EEF10, matching the canonical training reader.
 from __future__ import annotations
 
 import json
+import os
+from collections import deque
 from pathlib import Path
 from typing import Iterable
 
@@ -32,6 +34,10 @@ LIBERO_ACTION_MODE = "eef"
 LIBERO_EEF10_DIM = 10
 LIBERO_ACTION7_DIM = 7
 PROPRIO_OBS_KEYS = ("robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos")
+# first: one server round-trip per env step (legacy).
+# all: consume the full action chunk locally (RoboTwin / batched_server style).
+ACTION_CHUNK_MODES = ("first", "all")
+
 
 
 def native_eef10_to_libero7d(action: np.ndarray, *, clip: bool = True) -> np.ndarray:
@@ -92,6 +98,7 @@ class OpenWAMLiberoPolicy:
         action_dim: int = LIBERO_ACTION7_DIM,
         action_indices: list[int] | None = None,
         action_clip: float | None = None,
+        action_chunk_mode: str = "all",
         debug: bool = False,
         debug_dir: str = "./debug_libero",
         _client=None,
@@ -104,6 +111,9 @@ class OpenWAMLiberoPolicy:
             raise ValueError("image_transform must be 'none' or 'rotate_180'")
         if int(action_dim) != LIBERO_ACTION7_DIM:
             raise ValueError(f"native-delta LIBERO runtime action_dim must be {LIBERO_ACTION7_DIM}")
+        chunk_mode = str(action_chunk_mode).strip().lower()
+        if chunk_mode not in ACTION_CHUNK_MODES:
+            raise ValueError(f"action_chunk_mode must be one of {ACTION_CHUNK_MODES}, got {action_chunk_mode!r}")
 
         self._client = _client or WSPolicyClient(f"ws://{host}:{port}", timeout=request_timeout)
         self._head_camera_key = head_camera_key
@@ -116,10 +126,14 @@ class OpenWAMLiberoPolicy:
         self._action_dim = int(action_dim)
         self._action_indices = action_indices
         self._action_clip = action_clip
+        self._action_chunk_mode = chunk_mode
+        self._pending: deque[np.ndarray] = deque()
         self._debug = bool(debug)
         self._debug_dir = Path(debug_dir)
         self._episode = -1
         self._step = 0
+        raw_slot = os.environ.get("LIBERO_SLOT", "").strip() or os.environ.get("ROBOTWIN_SLOT", "").strip()
+        self._slot_id = int(raw_slot) if raw_slot else None
         if self._debug:
             self._debug_dir.mkdir(parents=True, exist_ok=True)
 
@@ -134,7 +148,8 @@ class OpenWAMLiberoPolicy:
         print(
             f"[OpenWAMLiberoPolicy] server=ws://{host}:{port} "
             f"action_mode={LIBERO_ACTION_MODE} model_action_dim={LIBERO_EEF10_DIM} "
-            f"runtime_action_dim={self._action_dim} image_transform={image_transform} send_state={send_state}"
+            f"runtime_action_dim={self._action_dim} image_transform={image_transform} "
+            f"send_state={send_state} slot_id={self._slot_id} action_chunk_mode={self._action_chunk_mode}"
         )
 
     def close(self) -> None:
@@ -143,11 +158,17 @@ class OpenWAMLiberoPolicy:
     def reset(self) -> None:
         self._episode += 1
         self._step = 0
-        ack = self._client.reset()
+        self._pending.clear()
+        ack = self._client.reset(slot_id=self._slot_id)
         if ack.get("type") != "reset_ack":
             raise RuntimeError(f"OpenWAM server reset returned unexpected response: {ack}")
 
     def act(self, obs: dict, prompt: str) -> np.ndarray:
+        if self._action_chunk_mode == "all" and self._pending:
+            action = self._pending.popleft()
+            self._step += 1
+            return action
+
         payload = build_payload(
             head=encode_numpy_b64(resize_for_lshape_slot(self._image(obs, self._head_camera_key), "head_camera")),
             left_wrist=self._maybe_encode(obs, self._left_wrist_camera_key, "left_wrist_camera"),
@@ -155,21 +176,31 @@ class OpenWAMLiberoPolicy:
             prompt=prompt,
             state=self._state(obs),
         )
+        if self._slot_id is not None:
+            payload["slot_id"] = self._slot_id
         response = self._client.predict(payload)
-        model_action = np.asarray(response["action"], dtype=np.float32).reshape(-1)
-        if self._action_indices is not None:
-            model_action = model_action[self._action_indices]
-        if model_action.shape != (LIBERO_EEF10_DIM,):
-            raise ValueError(
-                f"OpenWAM returned action dim {model_action.shape[0]}, expected {LIBERO_EEF10_DIM} "
-                "raw native-delta EEF10 values"
-            )
-        action = native_eef10_to_libero7d(model_action)
-        if self._action_clip is not None:
-            action = np.clip(action, -float(self._action_clip), float(self._action_clip))
-        self._maybe_debug(obs, payload, model_action, action)
+        raw_chunk = response.get("actions") if self._action_chunk_mode == "all" else None
+        if not raw_chunk:
+            raw_chunk = [response["action"]]
+        converted: list[np.ndarray] = []
+        for raw in raw_chunk:
+            model_action = np.asarray(raw, dtype=np.float32).reshape(-1)
+            if self._action_indices is not None:
+                model_action = model_action[self._action_indices]
+            if model_action.shape != (LIBERO_EEF10_DIM,):
+                raise ValueError(
+                    f"OpenWAM returned action dim {model_action.shape[0]}, expected {LIBERO_EEF10_DIM} "
+                    "raw native-delta EEF10 values"
+                )
+            action = native_eef10_to_libero7d(model_action)
+            if self._action_clip is not None:
+                action = np.clip(action, -float(self._action_clip), float(self._action_clip))
+            converted.append(action)
+        self._maybe_debug(obs, payload, np.asarray(raw_chunk[0], dtype=np.float32).reshape(-1), converted[0])
+        if self._action_chunk_mode == "all" and len(converted) > 1:
+            self._pending.extend(converted[1:])
         self._step += 1
-        return action
+        return converted[0]
 
     def _image(self, obs: dict, key: str) -> np.ndarray:
         if key not in obs:
@@ -219,6 +250,7 @@ class OpenWAMLiberoPolicy:
 
 
 __all__ = [
+    "ACTION_CHUNK_MODES",
     "LIBERO_ACTION7_DIM",
     "LIBERO_ACTION_MODE",
     "LIBERO_EEF10_DIM",

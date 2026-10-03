@@ -3,7 +3,13 @@ checkpoint_path: null          # Default checkpoint dir; --ckpt-dir overrides
 device: cuda:0
 server:
   host: "0.0.0.0"
-  port: 8848                   # WebSocket port
+  port: 8848                   # WebSocket port (openwam JSON protocol)
+
+# Piper / openpi-client wire protocol (``--protocol openpi``). See README_piper.md.
+piper_openpi:
+  port: 8000                   # used when --protocol openpi and --port unset
+  training_rtc: false          # set true (or pass --training-rtc) for RTC metadata
+  max_delay: 8                 # RTC delay upper bound (inclusive); need action_horizon > max_delay
 
 # --- Inference (cfg.inference) ---
 # Every field has a same-name CLI override (--denoise-steps, --inference-mode, ...).

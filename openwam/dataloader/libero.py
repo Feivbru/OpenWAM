@@ -15,10 +15,11 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, ClassVar, Optional, Sequence, Tuple
+from typing import Any, ClassVar, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+import torch
 
 from openwam.dataloader.bases import LeRobotV3Reader
 from openwam.dataloader.utils.normalization import (
@@ -99,6 +100,8 @@ class LiberoDataset(LeRobotV3Reader):
     CONFIG_KEYS: ClassVar[Tuple[str, ...]] = LeRobotV3Reader.CONFIG_KEYS + (
         "action_mode",
         "normalization_stats_path",
+        "use_t5_cache",
+        "t5_cache_dirname",
     )
 
     def __init__(
@@ -109,6 +112,8 @@ class LiberoDataset(LeRobotV3Reader):
         normalization_stats_path: Optional[str] = None,
         unify_action: bool = False,
         unify_action_map: Optional[Any] = None,
+        use_t5_cache: bool = False,
+        t5_cache_dirname: str = "umt5_openwam",
         **kwargs: Any,
     ):
         mode = str(action_mode).strip().lower()
@@ -123,6 +128,10 @@ class LiberoDataset(LeRobotV3Reader):
         self.action_mode = mode
         self._source_stats_path = str(normalization_stats_path) if normalization_stats_path else None
         self._state_normalization_stats: Optional[dict] = None
+        self.use_t5_cache = bool(use_t5_cache)
+        self.t5_cache_dirname = str(t5_cache_dirname or "umt5_openwam")
+        self._t5_by_task: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
+        self._prompt_to_task_idx: Dict[str, int] = {}
         super().__init__(
             dataset_dir=dataset_dir,
             unify_action=bool(unify_action),
@@ -161,6 +170,80 @@ class LiberoDataset(LeRobotV3Reader):
                 f"{conversion_path} declares output_representation={conversion.get('output_representation')!r}, "
                 f"expected {OUTPUT_REPRESENTATION!r}; this is not a native-delta LIBERO dataset"
             )
+
+        # Offline UMT5 cache: one file per task_index under meta/<dirname>/.
+        # Built after _load_prompts so _task_idx_to_text is populated.
+        if self.use_t5_cache:
+            self._load_t5_cache()
+
+    def _t5_cache_dir(self) -> Path:
+        return self._dataset_dir / "meta" / self.t5_cache_dirname
+
+    def _load_t5_cache(self) -> None:
+        """Preload all task UMT5 embeds into memory (LIBERO has ~40 unique tasks)."""
+        if not getattr(self, "_task_idx_to_text", None):
+            raise RuntimeError("use_t5_cache=true but task prompt map is empty")
+        cache_dir = self._t5_cache_dir()
+        if not cache_dir.is_dir():
+            raise FileNotFoundError(
+                f"use_t5_cache=true but missing T5 cache dir: {cache_dir}. "
+                "Run scripts/precompute_libero_t5_embeds.py first."
+            )
+        self._prompt_to_task_idx = {
+            str(text).strip(): int(task_idx) for task_idx, text in self._task_idx_to_text.items()
+        }
+        missing = []
+        for task_idx, text in self._task_idx_to_text.items():
+            path = cache_dir / f"task_{int(task_idx)}.pt"
+            if not path.is_file():
+                missing.append(int(task_idx))
+                continue
+            payload = torch.load(path, map_location="cpu", weights_only=False)
+            cached_prompt = str(payload.get("prompt", "")).strip()
+            expected = str(text).strip()
+            if cached_prompt and cached_prompt != expected:
+                raise ValueError(
+                    f"T5 cache prompt mismatch for task_{task_idx}: "
+                    f"cache={cached_prompt!r} dataset={expected!r}"
+                )
+            ctx = payload["context"]
+            if not isinstance(ctx, torch.Tensor):
+                ctx = torch.as_tensor(ctx)
+            ctx = ctx.detach().to(dtype=torch.bfloat16, device="cpu").contiguous()
+            L = int(payload.get("seq_len", ctx.shape[0]))
+            if ctx.ndim != 2:
+                raise ValueError(f"task_{task_idx} t5 context must be [L, D], got {tuple(ctx.shape)}")
+            if ctx.shape[0] < L:
+                raise ValueError(f"task_{task_idx}: context length {ctx.shape[0]} < seq_len {L}")
+            if ctx.shape[0] > L:
+                ctx = ctx[:L].contiguous()
+            self._t5_by_task[int(task_idx)] = (ctx, torch.tensor(L, dtype=torch.long))
+        if missing:
+            raise FileNotFoundError(
+                f"use_t5_cache=true but missing {len(missing)}/{len(self._task_idx_to_text)} "
+                f"task cache files under {cache_dir} (e.g. task_{missing[0]}.pt). "
+                "Run scripts/precompute_libero_t5_embeds.py."
+            )
+        logger.info(
+            "LIBERO T5 cache ON: dirname=%s n_tasks=%d dir=%s",
+            self.t5_cache_dirname,
+            len(self._t5_by_task),
+            cache_dir,
+        )
+
+    def _getitem_impl(self, idx: int) -> dict:
+        sample = super()._getitem_impl(idx)
+        if not self.use_t5_cache:
+            return sample
+        prompt = str(sample["prompt"]).strip()
+        task_idx = self._prompt_to_task_idx.get(prompt)
+        if task_idx is None:
+            raise KeyError(f"use_t5_cache=true but prompt not in task map: {prompt!r}")
+        ctx, seq_lens = self._t5_by_task[task_idx]
+        sample["t5_context"] = ctx
+        sample["t5_seq_lens"] = seq_lens
+        sample["t5_task_index"] = int(task_idx)
+        return sample
 
     def _build_stats_rank0(self, path: Path) -> None:
         """Auto-build the pooled stats file: rank 0 scans, other ranks wait."""

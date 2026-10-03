@@ -53,7 +53,7 @@ def _native_client_command(args, job, trial_run, port, run_dir):
     return command
 
 
-def _native_client_env(base_env, *, libero_path, config_root, render_gpu):
+def _native_client_env(base_env, *, libero_path, config_root, render_gpu, libero_slot=None):
     """Set isolated LIBERO-plus paths and conservative thread defaults."""
     env = dict(base_env)
     old_pythonpath = env.get("PYTHONPATH", "")
@@ -79,6 +79,10 @@ def _native_client_env(base_env, *, libero_path, config_root, render_gpu):
             "NUMEXPR_NUM_THREADS": "1",
         }
     )
+    if libero_slot is not None:
+        env["LIBERO_SLOT"] = str(int(libero_slot))
+    else:
+        env.pop("LIBERO_SLOT", None)
     return env
 
 

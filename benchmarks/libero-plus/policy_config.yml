@@ -2,7 +2,8 @@
 policy_name: openwam_libero
 host: "127.0.0.1"
 port: 8848
-request_timeout: 300
+# Batched servers queue multiple sims; allow long waits for a denoise slot.
+request_timeout: 900
 
 suite: libero_spatial
 task_id: 0
@@ -36,6 +37,9 @@ image_transform: rotate_180
 action_mode: eef
 state_dim: 10
 send_state: true
+# first = one WS round-trip per env step (legacy).
+# all = consume full server action chunk locally (needed for batched_server speed).
+action_chunk_mode: all
 action_indices: null
 action_clip: null
 

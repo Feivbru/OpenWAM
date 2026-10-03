@@ -42,6 +42,14 @@ target_camera: observation.images.image
 # auto-built on first use (rank 0 scans, other ranks wait).
 normalize_mode: min-max
 
+# ── Offline T5 cache (optional) ──────────────────────────────────────────────
+# When true, load UMT5 embeddings from
+# ``<dataset_dir>/meta/<t5_cache_dirname>/task_{task_index}.pt`` (produced by
+# scripts/precompute_libero_t5_embeds.py). Trainer then sets skip_text_encoder
+# so UMT5 weights are not instantiated. Default off for existing train.yaml.
+use_t5_cache: false
+t5_cache_dirname: umt5_openwam
+
 # ── Video augmentation (optional) ────────────────────────────────────────────
 # Load-time color jitter applied by the reader to each clip with the SAME
 # random factors across all frames (temporal consistency), TRAIN split only.

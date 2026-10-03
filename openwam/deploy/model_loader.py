@@ -20,6 +20,69 @@ from openwam.model.architectures.base import BaseWAMArchitecture
 logger = logging.getLogger(__name__)
 
 
+def _hydrate_wan_text_encoder(
+    architecture: BaseWAMArchitecture,
+    cfg: DictConfig,
+    ckpt_dir: str,
+) -> None:
+    """Attach frozen UMT5 + tokenizer onto a Wan video backbone built with ``skip_text_encoder``.
+
+    Training with ``dataloader.use_t5_cache=true`` never saves ``video_backbone.text_encoder.*``
+    into the unified safetensors. Deploy still needs a live encoder for
+    ``encode_text`` at inference, so load the original Wan UMT5 weights from
+    ``model.video_backbone.model_path`` (same file training used before caching).
+    """
+    vb = getattr(architecture, "video_backbone", None)
+    if vb is None:
+        raise RuntimeError("skip_text_encoder hydrate requires architecture.video_backbone")
+    if getattr(vb, "text_encoder", None) is not None and getattr(vb, "_tokenizer", None) is not None:
+        logger.info("video_backbone already has text_encoder + tokenizer; skip hydrate")
+        return
+
+    wan_path = OmegaConf.select(cfg, "model.video_backbone.model_path", default=None)
+    if not wan_path:
+        raise RuntimeError(
+            "Checkpoint was trained with T5 cache (no text_encoder in safetensors) but "
+            "model.video_backbone.model_path is missing — cannot load Wan UMT5 for deploy."
+        )
+    wan_path = str(wan_path)
+    if not os.path.isdir(wan_path):
+        raise FileNotFoundError(
+            f"Wan model_path for text_encoder hydrate does not exist: {wan_path}"
+        )
+
+    from openwam.model.video_backbone.wan.models.text_encoder import (
+        HuggingfaceTokenizer,
+        WanTextEncoder,
+    )
+
+    tok_dir = os.path.join(ckpt_dir, "tokenizer", "google", "umt5-xxl")
+    if not os.path.isdir(tok_dir):
+        tok_dir = os.path.join(wan_path, "google", "umt5-xxl")
+    if not os.path.isdir(tok_dir):
+        raise FileNotFoundError(
+            f"UMT5 tokenizer not found under {ckpt_dir}/tokenizer/google/umt5-xxl "
+            f"or {wan_path}/google/umt5-xxl"
+        )
+
+    pth = os.path.join(wan_path, "models_t5_umt5-xxl-enc-bf16.pth")
+    if not os.path.isfile(pth):
+        raise FileNotFoundError(
+            f"Wan UMT5 weights not found at {pth} "
+            "(needed because this checkpoint omitted text_encoder via use_t5_cache)"
+        )
+
+    logger.info("Hydrating Wan text_encoder from %s (tokenizer=%s)", pth, tok_dir)
+    tokenizer = HuggingfaceTokenizer(name=tok_dir, seq_len=512, clean="whitespace")
+    text_encoder = WanTextEncoder()
+    raw = torch.load(pth, map_location="cpu", weights_only=True)
+    text_encoder.load_state_dict(raw, strict=True)
+    text_encoder.eval()
+    # Named-child registration so set_dtype_device / state_dict see it.
+    vb.text_encoder = text_encoder
+    vb._tokenizer = tokenizer
+
+
 def _find_latest_checkpoint(ckpt_dir: str) -> str:
     """Return the path to the highest-step ``checkpoint_step_N.safetensors`` in *ckpt_dir*.
 
@@ -76,6 +139,11 @@ def load_from_checkpoint_dir(
         device: Target device (e.g. ``"cuda"`` or ``"cuda:0"``).
         ckpt_name: Specific checkpoint filename.  If *None*, the latest
             (highest step number) checkpoint is used.
+        skip_text_encoder: If True, do not construct Wan UMT5 at backbone
+            build time; load it separately from ``model_path`` after the
+            unified safetensors load. Also auto-enabled when the saved
+            config has ``dataloader.use_t5_cache=true`` (those checkpoints
+            omit ``video_backbone.text_encoder.*``).
 
     Returns:
         ``(cfg, architecture)`` — the resolved config and architecture
@@ -86,6 +154,17 @@ def load_from_checkpoint_dir(
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"config.yaml not found in {ckpt_dir}")
     cfg = OmegaConf.load(config_path)
+
+    # Training with T5 cache never writes text_encoder into the unified
+    # safetensors. Auto-skip construction so strict load does not fail on
+    # hundreds of missing UMT5 keys; hydrate from Wan model_path after load.
+    use_t5_cache = bool(OmegaConf.select(cfg, "dataloader.use_t5_cache", default=False))
+    if use_t5_cache and not skip_text_encoder:
+        skip_text_encoder = True
+        logger.info(
+            "dataloader.use_t5_cache=true in checkpoint config — "
+            "auto skip_text_encoder + hydrate Wan UMT5 after weight load"
+        )
 
     # 2. Resolve checkpoint file
     if ckpt_name is not None:
@@ -217,6 +296,11 @@ def load_from_checkpoint_dir(
 
     # 4. Load all weights from checkpoint
     architecture.load_checkpoint(ckpt_path)
+
+    # 4b. T5-cache / skip_text_encoder: restore live UMT5 for encode_text before
+    # set_dtype_device so the hydrated module moves with the backbone.
+    if skip_text_encoder:
+        _hydrate_wan_text_encoder(architecture, cfg, ckpt_dir)
 
     # 5. Move to device and set eval mode — top-down: architecture → video_backbone → submodules.
     _mp = OmegaConf.select(cfg, "training.mixed_precision", default="bf16")

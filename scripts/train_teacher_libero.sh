@@ -10,10 +10,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 mkdir -p logs
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2,3}"
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export CUDA_VISIBLE_DEVICES="2,3,4,5,6,7"
+# Do not set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True (NaN risk on H20).
+unset PYTORCH_CUDA_ALLOC_CONF
 export HYDRA_FULL_ERROR=1
-export WANDB_MODE="${WANDB_MODE:-online}"
+export WANDB_MODE="online"
 export WANDB_API_KEY="${WANDB_API_KEY:-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}"
 export OPENWAM_WAN22_TI2V_5B="${OPENWAM_WAN22_TI2V_5B:-/data/zixian_guo/projects/haoming/project/Motus/pretrained_models/Wan2.2-TI2V-5B}"
 WAN_PATH="$OPENWAM_WAN22_TI2V_5B"
@@ -25,7 +26,7 @@ CONDA_ENV="${CONDA_ENV:-openwam}"
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$CONDA_ENV"
 
-NPROC="${NPROC:-2}"
+NPROC="${NPROC:-6}"
 MASTER_PORT="${MASTER_PORT:-29584}"
 LOG="logs/teacher_libero_$(date +%Y%m%d_%H%M%S).log"
 

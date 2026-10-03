@@ -12,6 +12,12 @@ from openwam.deploy.denoise_schedule import (
 from openwam.deploy.engine import JointInferenceEngine
 from openwam.deploy.model_loader import load_from_checkpoint_dir
 
+try:
+    from openwam.deploy.openpi_piper_server import OpenPIPiperServer, PiperOpenPIPolicy
+except ImportError:
+    OpenPIPiperServer = None
+    PiperOpenPIPolicy = None
+
 __all__ = [
     "BaseInferenceEngine",
     "JointInferenceEngine",
@@ -20,4 +26,6 @@ __all__ = [
     "make_schedule",
     "schedule_sync",
     "PolicyServer",
+    "OpenPIPiperServer",
+    "PiperOpenPIPolicy",
 ]

@@ -20,7 +20,7 @@ training:
   max_grad_norm: 1.0
 
   num_epochs: null
-  max_steps: 5000
+  max_steps: 3500
   batch_size: 16
   gradient_accumulation_steps: 1
 
@@ -58,11 +58,14 @@ training:
 
   dataset_num_workers: 4
 
+dataloader:
+  use_t5_cache: true
+
 model:
   # Unfreezing video DiT under ZeRO-2+bf16 NaNs after the first optimizer step on
   # LIBERO (param poison). Freeze video DiT; action expert still trains (same
   # workable pattern as C2R RoboTwin teacher). Revisit when root-caused.
-  freeze_video_dit: true
+  freeze_video_dit: false
   architecture:
     mot_checkpoint_mixed_attn: true
   video_backbone:
