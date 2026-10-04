@@ -4,8 +4,8 @@
 
 ```bash
 # OpenPI msgpack 协议（真机 WebsocketClientPolicy）
-CUDA_VISIBLE_DEVICES=6 bash scripts/deploy_piper_openpi.sh \
-  /data/zixian_guo/projects/haoming/project/PI/OpenWAM/outputs/banana_piper_ft/2026-10-02_15-49-35
+CUDA_VISIBLE_DEVICES=7 bash scripts/deploy_piper_openpi.sh \
+  /data/zixian_guo/projects/haoming/project/PI/OpenWAM/outputs/book_piper_ft/2026-10-03_18-56-10
 # 等价：python scripts/deploy.py --ckpt-dir /path/to/banana_ckpt --protocol openpi --port 8000
 
 # 可选 RTC metadata

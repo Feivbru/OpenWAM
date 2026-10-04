@@ -34,7 +34,8 @@
 #   PORT_BASE   first inference port (default 9202). Infer ordinal i uses
 #               PORT_BASE+10*i and the next port for its encoder.
 #   WAN_PATH    UMT5 weights (default: Motus Wan2.2-TI2V-5B)
-#   ENCODER_DEVICE  device for UMT5 (default cpu — frees ~16GB on infer GPU)
+#   ENCODER_DEVICE  device for UMT5 (default cuda:0 = same physical GPU as infer;
+#                   CVD masks each infer card to logical 0. Use cpu to free ~16GB.)
 #   MAX_INFER_BATCH max slots per generate_batch (default 2; 0 = unlimited)
 set -euo pipefail
 
@@ -70,8 +71,15 @@ Other:
   --skip-file      lines of mode:task to leave out
   --port-base      first inference port (default 9202)
   --wan-path       UMT5 weights dir
+  --resume-from    resume from a prior batched_eval log dir (reuses that dir).
+                   Per mode×task: skip if already at --resume-target episodes;
+                   else continue at last_seed+1 with prior success counters.
+                   GPU / multi-sim scheduling is identical to a fresh run.
+  --resume-target  total episodes per task when resuming (default 100)
+  --sequential     force width=1 (one sim client at a time; optional debug)
 
 Tasks: names, a comma list, "all", or a file (one task per line).
+  With --resume-from and no tasks given, defaults to "all".
 EOF
 }
 
@@ -86,9 +94,13 @@ N_SIMS="${N_SIMS:-4}"
 PORT_BASE="${PORT_BASE:-9202}"
 ROBOTWIN_SEED="${ROBOTWIN_SEED:-0}"
 SKIP_FILE=""
+RESUME_FROM="${RESUME_FROM:-}"
+RESUME_TARGET="${RESUME_TARGET:-100}"
+SEQUENTIAL="${SEQUENTIAL:-0}"
 WAN_PATH="${WAN_PATH:-/data/zixian_guo/projects/haoming/project/Motus/pretrained_models/Wan2.2-TI2V-5B}"
 CONDA_ENV="${CONDA_ENV:-openwam}"
-ENCODER_DEVICE="${ENCODER_DEVICE:-cpu}"
+# Default: colocate T5 with the infer card (CUDA_VISIBLE_DEVICES=${infer_gpu} → cuda:0).
+ENCODER_DEVICE="${ENCODER_DEVICE:-cuda:0}"
 # Peak denoise with torch.compile leaves ~80GB resident; 4-wide OOM'd a 96GB card.
 MAX_INFER_BATCH="${MAX_INFER_BATCH:-2}"
 
@@ -106,14 +118,29 @@ while (( $# > 0 )); do
         --seed)          ROBOTWIN_SEED="$2"; shift 2 ;;
         --skip-file)     SKIP_FILE="$2"; shift 2 ;;
         --wan-path)      WAN_PATH="$2"; shift 2 ;;
+        --resume-from)   RESUME_FROM="$2"; shift 2 ;;
+        --resume-target) RESUME_TARGET="$2"; shift 2 ;;
+        --sequential)    SEQUENTIAL=1; shift ;;
         -h|--help)       usage; exit 0 ;;
         -*)              echo "[ERROR] Unknown option: $1" >&2; usage; exit 1 ;;
         *)               break ;;
     esac
 done
 
-[[ -n "${CKPT_DIR}" && -n "${TASK_CONFIG}" && -n "${POLICY_NAME}" ]] || {
-    echo "[ERROR] Need -d, -m, -n" >&2; usage; exit 1; }
+# Resume can recover -d/-m/-n from the log directory when omitted.
+if [[ -n "${RESUME_FROM}" ]]; then
+    RESUME_FROM="$(cd "${RESUME_FROM}" && pwd)"
+    [[ -d "${RESUME_FROM}" ]] || { echo "[ERROR] --resume-from not a directory: ${RESUME_FROM}" >&2; exit 1; }
+    [[ "${RESUME_TARGET}" =~ ^[0-9]+$ ]] && (( RESUME_TARGET >= 1 )) || {
+        echo "[ERROR] --resume-target must be >= 1" >&2; exit 1; }
+    # Same task grid as a fresh full eval unless the user names a subset.
+    (( $# > 0 )) || set -- all
+fi
+
+if [[ -z "${RESUME_FROM}" ]]; then
+    [[ -n "${CKPT_DIR}" && -n "${TASK_CONFIG}" && -n "${POLICY_NAME}" ]] || {
+        echo "[ERROR] Need -d, -m, -n (or --resume-from)" >&2; usage; exit 1; }
+fi
 
 # Resolve infer / sim GPU lists.
 if [[ -n "${INFER_GPUS}" || -n "${SIM_GPUS}" ]]; then
@@ -135,6 +162,39 @@ else
     # Cluster default: 1 infer + 5 sim, n=4.
     INFER_GPUS="${INFER_GPUS:-2}"
     SIM_GPUS="${SIM_GPUS:-3,4,5,6,7}"
+fi
+
+# Parse resume plans early (needs python; use system/openwam later for servers).
+RESUME_PLAN_FILE=""
+if [[ -n "${RESUME_FROM}" ]]; then
+    RESUME_PLAN_FILE="$(mktemp "${TMPDIR:-/tmp}/batched_eval_resume.XXXXXX.jsonl")"
+    _py_resume="${RESUME_PYTHON:-python3}"
+    if [[ -x "/data/anaconda3/envs/openwam/bin/python" ]]; then
+        _py_resume="/data/anaconda3/envs/openwam/bin/python"
+    fi
+    # Full plan for the log dir (task filter applied later via the normal TASKS grid).
+    "${_py_resume}" "${SCRIPT_DIR}/resume_from_logs.py" "${RESUME_FROM}" \
+        --target "${RESUME_TARGET}" \
+        --base-seed "${ROBOTWIN_SEED}" \
+        > "${RESUME_PLAN_FILE}"
+    # Recover missing -d/-m/-n from summary line.
+    _summary_json="$("${_py_resume}" -c 'import json,sys
+p=sys.argv[1]
+last=None
+for line in open(p):
+    o=json.loads(line)
+    if o.get("_summary"): last=o
+print(json.dumps(last or {}))' "${RESUME_PLAN_FILE}")"
+    if [[ -z "${CKPT_DIR}" ]]; then
+        CKPT_DIR="$(printf '%s' "${_summary_json}" | "${_py_resume}" -c 'import json,sys; print(json.load(sys.stdin).get("ckpt_dir") or "")')"
+    fi
+    if [[ -z "${POLICY_NAME}" ]]; then
+        POLICY_NAME="$(printf '%s' "${_summary_json}" | "${_py_resume}" -c 'import json,sys; print(json.load(sys.stdin).get("policy_name") or "")')"
+    fi
+    if [[ -z "${TASK_CONFIG}" ]]; then
+        TASK_CONFIG="$(printf '%s' "${_summary_json}" | "${_py_resume}" -c 'import json,sys; print(json.load(sys.stdin).get("modes") or "both")')"
+    fi
+    echo "[batched_eval] resume-from=${RESUME_FROM} target=${RESUME_TARGET} recovered ckpt=${CKPT_DIR} name=${POLICY_NAME} modes=${TASK_CONFIG}"
 fi
 
 MODES=()
@@ -160,9 +220,12 @@ done
 MODES=("${_deduped[@]}")
 (( ${#MODES[@]} > 0 )) || { echo "[ERROR] No modes in -m ${TASK_CONFIG}" >&2; exit 1; }
 MODE_LABEL="$(IFS=+; echo "${MODES[*]}")"
-[[ -d "${CKPT_DIR}" ]] || { echo "[ERROR] ckpt not found: ${CKPT_DIR}" >&2; exit 1; }
+[[ -n "${CKPT_DIR}" && -d "${CKPT_DIR}" ]] || { echo "[ERROR] ckpt not found: ${CKPT_DIR}" >&2; exit 1; }
+[[ -n "${POLICY_NAME}" ]] || { echo "[ERROR] missing -n / policy name" >&2; exit 1; }
 [[ "${N_SIMS}" =~ ^[0-9]+$ ]] && (( N_SIMS >= 1 )) || { echo "[ERROR] --n-sims must be >= 1" >&2; exit 1; }
-(( $# > 0 )) || { echo "[ERROR] No tasks specified." >&2; usage; exit 1; }
+if [[ -z "${RESUME_FROM}" ]]; then
+    (( $# > 0 )) || { echo "[ERROR] No tasks specified." >&2; usage; exit 1; }
+fi
 
 ROBOTWIN_PATH="${ROBOTWIN_PATH:-${ROOT}/third_party/RoboTwin}"
 [[ -d "${ROBOTWIN_PATH}" ]] || { echo "[ERROR] ROBOTWIN_PATH not found: ${ROBOTWIN_PATH}" >&2; exit 1; }
@@ -211,6 +274,17 @@ if (( ${#_colocated[@]} > 0 )); then
 fi
 
 WIDTH=$(( N_SIM_GPU * N_SIMS ))
+if [[ "${SEQUENTIAL}" == "1" ]]; then
+    # Optional debug: one in-flight sim client (does not affect seed continuity).
+    if (( WIDTH != 1 )); then
+        echo "[batched_eval] --sequential: forcing width=1 (was n_sims=${N_SIMS} x ${N_SIM_GPU} sim GPUs)"
+    fi
+    N_SIMS=1
+    SIM_GPUS="${SIM_ARR[0]}"
+    SIM_ARR=("${SIM_ARR[0]}")
+    N_SIM_GPU=1
+    WIDTH=1
+fi
 
 # Partition sim GPUs across infer GPUs (contiguous chunks, as even as possible).
 # SIM_OWNER[j] = infer ordinal that owns SIM_ARR[j]
@@ -265,8 +339,14 @@ done
 (( ${#TASKS[@]} > 0 )) || { echo "[ERROR] No tasks resolved." >&2; exit 1; }
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
-LOG_DIR="${ROOT}/logs/batched_eval_${POLICY_NAME}_${MODE_LABEL}_${STAMP}"
-mkdir -p "${LOG_DIR}"
+if [[ -n "${RESUME_FROM}" ]]; then
+    LOG_DIR="${RESUME_FROM}"
+    mkdir -p "${LOG_DIR}"
+    echo "[batched_eval] appending logs under resume dir ${LOG_DIR}"
+else
+    LOG_DIR="${ROOT}/logs/batched_eval_${POLICY_NAME}_${MODE_LABEL}_${STAMP}"
+    mkdir -p "${LOG_DIR}"
+fi
 
 pids=()
 cleanup() {
@@ -276,6 +356,7 @@ cleanup() {
         kill "${pid}" 2>/dev/null || true
     done
     wait 2>/dev/null || true
+    [[ -n "${RESUME_PLAN_FILE:-}" && -f "${RESUME_PLAN_FILE:-}" ]] && rm -f "${RESUME_PLAN_FILE}" || true
 }
 trap cleanup INT TERM EXIT
 
@@ -394,19 +475,83 @@ fi
 
 job_mode=()
 job_task=()
+job_st_seed=()
+job_resume_done=()
+job_resume_suc=()
+job_log=()
 skipped=0
+resume_hit=0
+fresh_hit=0
+
+# mode:task -> resume fields (only jobs that already have a log in RESUME_FROM).
+declare -A R_DONE=() R_SUC=() R_NEXT=() R_LOG=() R_COMPLETE=()
+if [[ -n "${RESUME_FROM}" ]]; then
+    [[ -n "${RESUME_PLAN_FILE}" && -f "${RESUME_PLAN_FILE}" ]] || {
+        echo "[ERROR] resume plan missing" >&2; exit 1; }
+    while IFS=$'\t' read -r _rk _rdone _rsuc _rnext _rcomplete _rlog || [[ -n "${_rk}" ]]; do
+        [[ -n "${_rk}" ]] || continue
+        R_DONE["${_rk}"]="${_rdone}"
+        R_SUC["${_rk}"]="${_rsuc}"
+        R_NEXT["${_rk}"]="${_rnext}"
+        R_COMPLETE["${_rk}"]="${_rcomplete}"
+        R_LOG["${_rk}"]="${_rlog}"
+    done < <("${OPENWAM_PYTHON}" -c '
+import json, sys
+for line in open(sys.argv[1]):
+    o = json.loads(line)
+    if o.get("_summary"):
+        continue
+    key = "{}:{}".format(o["mode"], o["task"])
+    print("\t".join([
+        key,
+        str(o["done"]),
+        str(o["suc"]),
+        str(o["next_seed"]),
+        "1" if o.get("skip") or o.get("complete") else "0",
+        o.get("log") or "",
+    ]))
+' "${RESUME_PLAN_FILE}")
+fi
+
+# Same mode×task grid as a fresh run; overlay resume state when present.
 for TASK_CONFIG in "${MODES[@]}"; do
     for task in "${TASKS[@]}"; do
-        if [[ -n "${SKIP_JOBS[${TASK_CONFIG}:${task}]:-}" ]]; then
+        _key="${TASK_CONFIG}:${task}"
+        if [[ -n "${SKIP_JOBS[${_key}]:-}" ]]; then
             skipped=$(( skipped + 1 ))
             continue
         fi
-        job_mode+=("${TASK_CONFIG}")
-        job_task+=("${task}")
+        if [[ -n "${R_COMPLETE[${_key}]:-}" ]]; then
+            if [[ "${R_COMPLETE[${_key}]}" == "1" ]]; then
+                skipped=$(( skipped + 1 ))
+                continue
+            fi
+            job_mode+=("${TASK_CONFIG}")
+            job_task+=("${task}")
+            job_st_seed+=("${R_NEXT[${_key}]}")
+            job_resume_done+=("${R_DONE[${_key}]}")
+            job_resume_suc+=("${R_SUC[${_key}]}")
+            job_log+=("${R_LOG[${_key}]}")
+            resume_hit=$(( resume_hit + 1 ))
+        else
+            # Never started in the prior dir: launch fresh like a from-scratch eval.
+            job_mode+=("${TASK_CONFIG}")
+            job_task+=("${task}")
+            job_st_seed+=("")
+            job_resume_done+=("")
+            job_resume_suc+=("")
+            job_log+=("")
+            fresh_hit=$(( fresh_hit + 1 ))
+        fi
     done
 done
-echo "[batched_eval] queue ${#job_task[@]} jobs, skipped ${skipped}"
+if [[ -n "${RESUME_FROM}" ]]; then
+    echo "[batched_eval] resume queue ${#job_task[@]} jobs (resume=${resume_hit} fresh=${fresh_hit} skip=${skipped}), target=${RESUME_TARGET}, width=${WIDTH}"
+else
+    echo "[batched_eval] queue ${#job_task[@]} jobs, skipped ${skipped}"
+fi
 job_total="${#job_task[@]}"
+(( job_total > 0 )) || { echo "[ERROR] No jobs to run (all complete or filtered)." >&2; exit 1; }
 job_next=0
 slot_pid=()
 for (( k=0; k<WIDTH; k++ )); do
@@ -417,6 +562,10 @@ launch_into_slot() {
     local k="$1"
     local mode="${job_mode[$job_next]}"
     local task="${job_task[$job_next]}"
+    local st_seed="${job_st_seed[$job_next]:-}"
+    local resume_done="${job_resume_done[$job_next]:-}"
+    local resume_suc="${job_resume_suc[$job_next]:-}"
+    local prior_log="${job_log[$job_next]:-}"
     job_next=$(( job_next + 1 ))
     local sim_i=$(( k / N_SIMS ))
     local local_slot=$(( k % N_SIMS ))
@@ -427,11 +576,33 @@ launch_into_slot() {
     # Global slot id on that infer server (must be unique among its clients).
     local global_slot=$(( SIM_SLOT_BASE[sim_i] + local_slot ))
     local log="${LOG_DIR}/${mode}_${task}_gpu${sim_gpu}_slot${global_slot}.log"
-    echo "[batched_eval] ${job_next}/${job_total} ${mode} ${task} -> sim_gpu ${sim_gpu} slot ${global_slot} (infer gpu ${infer_gpu} :${infer_port})"
-    ROBOTWIN_SLOT="${global_slot}" \
+    # Resume: append into the original task log so Success-rate history stays contiguous.
+    if [[ -n "${prior_log}" ]]; then
+        log="${prior_log}"
+    fi
+    local extra_msg=""
+    if [[ -n "${st_seed}" ]]; then
+        extra_msg=" resume done=${resume_done}/${RESUME_TARGET} suc=${resume_suc} next_seed=${st_seed}"
+    fi
+    echo "[batched_eval] ${job_next}/${job_total} ${mode} ${task} -> sim_gpu ${sim_gpu} slot ${global_slot} (infer gpu ${infer_gpu} :${infer_port})${extra_msg}"
+    (
+        export ROBOTWIN_SLOT="${global_slot}"
+        if [[ -n "${st_seed}" ]]; then
+            export ROBOTWIN_ST_SEED="${st_seed}"
+            export ROBOTWIN_RESUME_DONE="${resume_done}"
+            export ROBOTWIN_RESUME_SUC="${resume_suc}"
+            export ROBOTWIN_TARGET_EPISODES="${RESUME_TARGET}"
+            # Avoid ROBOTWIN_TEST_NUM shadowing the cumulative target.
+            unset ROBOTWIN_TEST_NUM || true
+            {
+                echo ""
+                echo "[batched_eval] ===== resume $(date -Is) st_seed=${st_seed} done=${resume_done} suc=${resume_suc} target=${RESUME_TARGET} ====="
+            } >> "${log}"
+        fi
         bash "${SCRIPT_DIR}/single_eval.sh" \
-        "${task}" "${mode}" "${POLICY_NAME}" "${sim_gpu}" "${infer_port}" "127.0.0.1" \
-        > "${log}" 2>&1 &
+            "${task}" "${mode}" "${POLICY_NAME}" "${sim_gpu}" "${infer_port}" "127.0.0.1" \
+            >> "${log}" 2>&1
+    ) &
     slot_pid[k]=$!
     pids+=("$!")
 }

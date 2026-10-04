@@ -91,8 +91,8 @@ trap 'rm -f "$LOCK"' EXIT
 echo "launching $(date -Is)" >"$STATUS_FILE"
 echo "[fpd_posttrain_eval] launching batched_eval (infer=2 sim=3-7 n-sims=4 max_batch=${MAX_INFER_BATCH:-2})"
 
-# Encoder on CPU frees ~16GB on the infer card; max_batch caps denoise width.
-export ENCODER_DEVICE="${ENCODER_DEVICE:-cpu}"
+# T5 defaults to same infer GPU (cuda:0 under CVD); override ENCODER_DEVICE=cpu to free VRAM.
+export ENCODER_DEVICE="${ENCODER_DEVICE:-cuda:0}"
 export MAX_INFER_BATCH="${MAX_INFER_BATCH:-2}"
 
 # Run eval in foreground of this tmux pane so logs stay attached

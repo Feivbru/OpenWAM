@@ -60,6 +60,8 @@ training:
   dataset_num_workers: 4
 
 dataloader:
+  # Clean2Random protocol: train on clean demos only; randomized is OOD eval.
+  variant: clean_50
   use_t5_cache: true
 
 model:

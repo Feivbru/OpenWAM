@@ -213,3 +213,5 @@ assets/*
 # Versioned repository images.
 !assets/repo_images/
 !assets/repo_images/**
+
+*.csv

@@ -196,15 +196,29 @@ def _install_env_trace_hooks(module) -> None:
 
 
 def _install_test_num_override(module) -> None:
-    value = os.environ.get("ROBOTWIN_TEST_NUM", "").strip()
+    """Cap / set total episode target for ``eval_policy``.
+
+    Priority:
+      1. ``ROBOTWIN_TARGET_EPISODES`` — total episodes (used by batched_eval --resume-from)
+      2. ``ROBOTWIN_TEST_NUM`` — legacy smoke/cap override
+
+    Resume also reads (handled inside RoboTwin ``eval_policy``):
+      ``ROBOTWIN_ST_SEED``, ``ROBOTWIN_RESUME_DONE``, ``ROBOTWIN_RESUME_SUC``.
+    """
+    value = (
+        os.environ.get("ROBOTWIN_TARGET_EPISODES", "").strip()
+        or os.environ.get("ROBOTWIN_TEST_NUM", "").strip()
+    )
     if not value:
         return
     try:
         test_num = int(value)
     except ValueError as exc:
-        raise ValueError(f"ROBOTWIN_TEST_NUM must be an integer, got {value!r}") from exc
+        raise ValueError(
+            f"ROBOTWIN_TARGET_EPISODES/ROBOTWIN_TEST_NUM must be an integer, got {value!r}"
+        ) from exc
     if test_num <= 0:
-        raise ValueError(f"ROBOTWIN_TEST_NUM must be > 0, got {test_num}")
+        raise ValueError(f"episode target must be > 0, got {test_num}")
 
     orig_eval_policy = module.eval_policy
 
