@@ -70,6 +70,15 @@ fpd:
   enabled: false
   teacher_ckpt_path: null
 
+# Video real-time conditioning (optional; see configs/train_pick_blocks_piper_vrtc.yaml).
+# When enabled, training keeps a clear future prefix on video/action (teacher-force)
+# instead of only the condition frame / proprio. Default off.
+vrtc:
+  enabled: false
+  fu_frames: 4              # clear future pixel frames; must be a multiple of 4 (Wan VAE)
+  condition_frames: 1       # currently fixed to 1
+
+
 project:
   name: openwam
   output_dir: outputs/${now:%Y-%m-%d_%H-%M-%S}

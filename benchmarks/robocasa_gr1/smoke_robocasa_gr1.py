@@ -9,9 +9,19 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from openwam2robocasa_gr1_interface import zero_action
 
 DEFAULT_ENV_ID = "gr1_unified/PnPCupToDrawerClose_GR1ArmsAndWaistFourierHands_Env"
+
+
+def zero_action(action_space) -> dict:
+    """Deterministic all-zero Dict action (keeps smoke free of OpenWAM imports)."""
+    spaces = getattr(action_space, "spaces", None)
+    if spaces is None:
+        raise TypeError("RoboCasa action_space must be a gymnasium.spaces.Dict")
+    return {
+        key: (0 if getattr(space, "shape", None) is None else np.zeros(space.shape, dtype=np.float32))
+        for key, space in spaces.items()
+    }
 
 
 def _repo_root() -> Path:

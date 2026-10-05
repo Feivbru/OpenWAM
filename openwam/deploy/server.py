@@ -32,8 +32,11 @@ Server-side behavior:
 
 Messages:
     obs   → {"type": "action", "action": [floats], "step": int, "latency_ms": float}
+            When ``server.return_action_chunk=true``, also includes
+            ``"actions": [[floats], ...]`` (full executable horizon) and the
+            server clears its buffer so the client owns open-loop execution.
     reset → {"type": "reset_ack"}
-    ping  → {"type": "pong"}
+    ping  → {"type": "pong", ..., "return_action_chunk": bool}
     error → {"type": "error", "code": str, "message": "<what went wrong>"}
 
 Usage:
@@ -48,6 +51,8 @@ import logging
 import time
 from pathlib import Path
 from typing import Optional
+
+import numpy as np
 
 from openwam.deploy.obs_preprocess import ObsPreprocessor, ObsValidationError
 
@@ -135,6 +140,11 @@ class PolicyServer:
         self._policy = None
         self._request_count = 0
         self._total_latency = 0.0
+        from omegaconf import OmegaConf
+
+        self._return_action_chunk = bool(
+            OmegaConf.select(cfg, "server.return_action_chunk", default=False)
+        )
 
     def _init_policy(self):
         """Initialize the receding-horizon policy."""
@@ -161,6 +171,10 @@ class PolicyServer:
             d.camera_layout if d.multiview else "[unused]",
             d.img_height,
             d.img_width,
+        )
+        logger.info(
+            "[server] return_action_chunk=%s (chunk wire response vs single-step drip-feed)",
+            self._return_action_chunk,
         )
 
     def _ckpt_contract(self) -> dict:
@@ -189,21 +203,32 @@ class PolicyServer:
                 preprocessing internally; prompt wrapping is the client's job.
 
         Returns:
-            dict with "action" (list of floats in physical units),
-            "step", "latency_ms".
+            dict with ``action`` (list of floats in physical units), ``step``,
+            ``latency_ms``. When ``server.return_action_chunk`` is true, also
+            ``actions`` (list of action lists for the executable horizon).
         """
         self._init_policy()
         t0 = time.monotonic()
 
         obs = self._obs_preprocessor.preprocess(obs)
-        action = self._policy.predict_action(obs)
+        if self._return_action_chunk:
+            actions = np.asarray(self._policy.predict_action_chunk(obs), dtype=np.float32)
+            if actions.ndim != 2 or actions.shape[0] < 1:
+                raise RuntimeError(f"predict_action_chunk returned invalid shape {actions.shape}")
+            payload = {
+                "action": actions[0].tolist(),
+                "actions": actions.tolist(),
+            }
+        else:
+            action = self._policy.predict_action(obs)
+            payload = {"action": np.asarray(action, dtype=np.float32).reshape(-1).tolist()}
 
         latency_ms = (time.monotonic() - t0) * 1000
         self._request_count += 1
         self._total_latency += latency_ms
 
         return {
-            "action": action.tolist(),
+            **payload,
             "step": self._request_count,
             "latency_ms": round(latency_ms, 2),
         }
@@ -251,7 +276,28 @@ class PolicyServer:
                             result["type"] = ACTION
                             await websocket.send(json.dumps(result))
                         elif msg_type == PING:
-                            await websocket.send(json.dumps({"type": PONG, **self._ckpt_contract()}))
+                            pong = {
+                                "type": PONG,
+                                **self._ckpt_contract(),
+                                "return_action_chunk": bool(self._return_action_chunk),
+                            }
+                            # Advertise VRTC cube wire so clients can set open-loop = stride.
+                            try:
+                                from openwam.vrtc import resolve_vrtc_config
+
+                                vrtc = resolve_vrtc_config(self.cfg)
+                                if vrtc.enabled:
+                                    pong["vrtc"] = {
+                                        "enabled": True,
+                                        "video_stride": int(vrtc.video_stride),
+                                        "cube_action_len": int(vrtc.video_stride),
+                                        "replan_cubes": int(vrtc.replan_cubes),
+                                        "predict_cubes": int(vrtc.predict_cubes),
+                                        "pool_warmup_cubes": int(vrtc.pool_warmup_cubes),
+                                    }
+                            except Exception:
+                                pass
+                            await websocket.send(json.dumps(pong))
                         else:
                             await websocket.send(
                                 json.dumps(
@@ -522,6 +568,14 @@ def _build_argparser() -> argparse.ArgumentParser:
         help="Override inference.inference_delay_steps (async only).",
     )
     parser.add_argument(
+        "--return-action-chunk",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        dest="return_action_chunk",
+        help="When set, each obs returns the full executable action chunk as "
+        "'actions' (and action=first). Default: server.return_action_chunk in deploy.yaml.",
+    )
+    parser.add_argument(
         "--protocol",
         type=str,
         choices=("openwam", "openpi"),
@@ -663,6 +717,11 @@ def main(argv: Optional[list[str]] = None):
     except ValueError as exc:
         parser.error(str(exc))
     _apply_compile_enabled_override(cfg, args.compile_enabled)
+
+    if args.return_action_chunk is not None:
+        OmegaConf.update(cfg, "server.return_action_chunk", bool(args.return_action_chunk), merge=False)
+        if args.protocol == "openpi" and args.return_action_chunk:
+            parser.error("--return-action-chunk applies to --protocol openwam only (openpi always returns a chunk)")
 
     # Checkpoint dir: CLI --ckpt-dir > checkpoint_path in the deploy yaml.
     ckpt_dir = args.ckpt_dir

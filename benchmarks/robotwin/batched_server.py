@@ -579,6 +579,7 @@ def main() -> None:
         device=args.device,
         ckpt_name=args.ckpt_name,
         skip_text_encoder=True,
+        hydrate_text_encoder=False,  # remote encoder_server supplies T5 embeds
     )
     merged = merge_deploy_cfg(training_cfg, cfg)
     # Compile / dtype path matches the single-sample server. generate() is not called.

@@ -8,6 +8,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Headless NVIDIA EGL (VulkanDrive) + default ROBOCASA_GR1_* paths.
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/openwam_robocasa_gr1_env.sh"
 
 MODE="${1:-${ROBOCASA_GR1_SMOKE_MODE:-import}}"
 PYTHON_BIN="${ROBOCASA_GR1_PYTHON:-python}"

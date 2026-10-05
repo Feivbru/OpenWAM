@@ -371,6 +371,15 @@ def _health_check(connection, request):
 
 def build_openpi_piper_server(engine, cfg, *, host: str, port: int, max_delay: Optional[int] = None, training_rtc: Optional[bool] = None):
     """Construct :class:`OpenPIPiperServer` around an already-built engine."""
+    from openwam.vrtc import resolve_vrtc_config
+
+    vrtc = resolve_vrtc_config(cfg)
+    if vrtc.enabled:
+        raise ValueError(
+            "vrtc.enabled=true is not supported on --protocol openpi yet "
+            "(cube-pool VRTC lives in WAMPolicy / JSON PolicyServer). "
+            "Serve with the default openwam protocol, or pass vrtc.enabled=false."
+        )
     metadata = build_piper_metadata(cfg, max_delay=max_delay, training_rtc=training_rtc)
     policy = PiperOpenPIPolicy(engine, cfg, metadata=metadata)
     return OpenPIPiperServer(policy=policy, host=host, port=port, metadata=metadata)

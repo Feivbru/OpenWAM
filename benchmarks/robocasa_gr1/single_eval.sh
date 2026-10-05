@@ -8,6 +8,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Headless NVIDIA EGL (VulkanDrive) + default ROBOCASA_GR1_* paths.
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/openwam_robocasa_gr1_env.sh"
 
 : "${ROBOCASA_GR1_PATH:?ROBOCASA_GR1_PATH must point to the robocasa-gr1-tabletop-tasks repo}"
 [[ -d "${ROBOCASA_GR1_PATH}" ]] || {

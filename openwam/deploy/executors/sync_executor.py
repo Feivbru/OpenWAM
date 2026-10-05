@@ -48,6 +48,20 @@ class SyncInferenceExecutor:
         action = self._action_buffer.popleft()
         return action
 
+    def predict_action_chunk(self, conditions: dict) -> np.ndarray:
+        """Generate (or refresh) and return the full executable horizon, then clear.
+
+        Used when the wire protocol delivers the whole chunk to the client so the
+        client can open-loop locally without further server round-trips.
+        """
+        self._action_buffer.clear()
+        self._generate_and_enqueue(conditions)
+        if not self._action_buffer:
+            raise RuntimeError("Inference produced an empty action chunk")
+        actions = np.stack([np.asarray(a, dtype=np.float32) for a in self._action_buffer], axis=0)
+        self._action_buffer.clear()
+        return actions
+
     def _generate_and_enqueue(self, conditions: dict):
         """Run inference and keep only the executable action horizon."""
         result = self.engine.generate(conditions)
