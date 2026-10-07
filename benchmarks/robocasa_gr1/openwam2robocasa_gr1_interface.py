@@ -16,7 +16,26 @@ from pathlib import Path  # noqa: E402
 import numpy as np  # noqa: E402
 
 from benchmarks.utils import WSPolicyClient, client, resize_for_lshape_slot, transport  # noqa: E402
-from openwam.dataloader.utils.gr1_kinematics import EEF33_DIM, GR1Kinematics  # noqa: E402
+
+
+def _load_gr1_kinematics():
+    """Import GR1Kinematics without pulling openwam.dataloader package __init__
+    (which requires pandas and other train-only deps absent from robocasa-gr1)."""
+    import importlib.util
+
+    path = Path(_PROJECT_ROOT) / "openwam" / "dataloader" / "utils" / "gr1_kinematics.py"
+    mod_name = "openwam_gr1_kinematics_standalone"
+    spec = importlib.util.spec_from_file_location(mod_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load GR1 kinematics from {path}")
+    mod = importlib.util.module_from_spec(spec)
+    # dataclasses look up cls.__module__ in sys.modules during decoration
+    _sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    return mod.EEF33_DIM, mod.GR1Kinematics
+
+
+EEF33_DIM, GR1Kinematics = _load_gr1_kinematics()
 
 
 def _as_vector(value) -> np.ndarray:
@@ -75,6 +94,12 @@ class OpenWAMRoboCasaGR1Policy:
         self._episode = -1
         self._step = 0
         self._ik_failures = 0
+        raw_slot = (
+            _os.environ.get("ROBOCASA_GR1_SLOT", "").strip()
+            or _os.environ.get("ROBOTWIN_SLOT", "").strip()
+            or _os.environ.get("LIBERO_SLOT", "").strip()
+        )
+        self._slot_id = int(raw_slot) if raw_slot else None
         if debug:
             self._debug_dir.mkdir(parents=True, exist_ok=True)
 
@@ -91,7 +116,7 @@ class OpenWAMRoboCasaGR1Policy:
         }
         print(
             f"[OpenWAMRoboCasaGR1Policy] server={self._ws_url} send_state={send_state} "
-            f"state_dim={state_dim} action_dims={action_dims}"
+            f"state_dim={state_dim} action_dims={action_dims} slot_id={self._slot_id}"
         )
 
     def close(self) -> None:
@@ -104,7 +129,7 @@ class OpenWAMRoboCasaGR1Policy:
         # RoboCasa rebuilds its MuJoCo simulation on reset; discard stale
         # MjModel/MjData handles before computing the next episode's FK/IK.
         self._kinematics = GR1Kinematics.from_env(self._env)
-        ack = self._client.reset()
+        ack = self._client.reset(slot_id=self._slot_id)
         if ack.get("type") != transport.RESET_ACK:
             raise RuntimeError(f"OpenWAM server reset returned unexpected response: {ack}")
 
@@ -122,6 +147,8 @@ class OpenWAMRoboCasaGR1Policy:
             prompt=prompt,
             state=state,
         )
+        if self._slot_id is not None:
+            payload["slot_id"] = int(self._slot_id)
         response = self._client.predict(payload)
         raw_action = _as_vector(response["action"])
         if raw_action.shape != (EEF33_DIM,):

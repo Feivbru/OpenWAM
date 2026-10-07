@@ -10,7 +10,7 @@ action_mode: eef
 # OpenWAM policy server connection.
 host: "127.0.0.1"
 port: 8848
-request_timeout: 300
+request_timeout: 600
 
 # Official RoboCasa GR1 tabletop gym id. The repository registers all 24 tasks
 # under gr1_unified/* for GR1ArmsAndWaistFourierHands.
@@ -43,3 +43,8 @@ state_dim: 33
 
 debug: false
 debug_dir: "./debug_robocasa_gr1"
+
+# Optional rollout mp4 (ego-view frames). Scheduler can override video_dir per run.
+save_video: false
+video_dir: "./videos_robocasa_gr1"
+video_fps: 20
