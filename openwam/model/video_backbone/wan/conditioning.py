@@ -104,13 +104,16 @@ def finalize_ti2v_first_frame_latents(inputs_shared: dict, first_frame_image, *,
             inputs_shared["num_clean_prefix_frames"] = 0
         return
     inputs_shared["fuse_vae_embedding_in_latents"] = True
-    inputs_shared["num_clean_prefix_frames"] = 0
     ref_frames = first_frame_image if isinstance(first_frame_image, list) else [first_frame_image]
     ref_tensor = wan_encode.preprocess_video(ref_frames, encoder=encoder, dtype=dtype, device=device)
     ref_image_latents = wan_encode.encode_video(ref_tensor.to(device), vae=vae, encoder=encoder).to(
         dtype=dtype, device=device
     )
     inputs_shared["first_frame_latents"] = ref_image_latents
+    # Single-frame TI2V historically used 0 (= implicit 1 via max(..., 1)).
+    # Multi-frame VRTC refs need an explicit count so clean future latents get t=0.
+    n_clean = int(ref_image_latents.shape[2])
+    inputs_shared["num_clean_prefix_frames"] = n_clean if n_clean > 1 else 0
 
 
 # ================================================================

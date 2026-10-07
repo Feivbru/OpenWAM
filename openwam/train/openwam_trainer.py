@@ -191,6 +191,22 @@ class OpenWAMTrainer:
                 self.lambda_action,
             )
 
+        # Optional VRTC: keep a clear future prefix on video/action (teacher-force).
+        from openwam.vrtc import resolve_vrtc_config
+
+        self.vrtc = resolve_vrtc_config(cfg)
+        if self.vrtc.enabled:
+            if self._fpd_enabled:
+                raise ValueError("vrtc.enabled=true is not supported together with fpd.enabled=true yet")
+            logger.info(
+                "VRTC enabled: fu_frames=%d clear_video=%d clear_action=%d clear_latents=%d predict_cubes=%d",
+                self.vrtc.fu_frames,
+                self.vrtc.clear_video_frames,
+                self.vrtc.clear_action_steps,
+                self.vrtc.clear_latent_frames,
+                self.vrtc.predict_cubes,
+            )
+
         # Push forward-time training flags onto the architecture so prepare_inputs
         # is self-contained.
         self.architecture.set_training_runtime(
@@ -821,6 +837,10 @@ class OpenWAMTrainer:
         inputs = self.architecture.prepare_inputs(batch)
         if self.lambda_action > 0 and inputs.get("actions") is None:
             raise ValueError("lambda_action > 0 but no action in data.")
+
+        if self.vrtc.enabled:
+            inputs["vrtc_clear_latent_frames"] = self.vrtc.clear_latent_frames
+            inputs["vrtc_clear_action_steps"] = self.vrtc.clear_action_steps
 
         result = self.architecture.compute_loss(
             **inputs,

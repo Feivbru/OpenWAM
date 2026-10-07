@@ -234,6 +234,35 @@ class AsyncInferenceExecutor:
 
         return action
 
+    def predict_action_chunk(self, conditions: dict) -> np.ndarray:
+        """Synchronously generate one executable horizon and return it as a chunk.
+
+        Cancels any in-flight background prefetch so the returned chunk is a
+        fresh, coherent open-loop sequence for the client.
+        """
+        self._last_conditions = conditions
+        with self._lock:
+            if self._pending_future is not None:
+                future = self._pending_future
+                self._pending_future = None
+                self._pending_start_step = None
+                if not future.cancel():
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        logger.debug("Discarding failed async prefetch during chunk predict: %s", exc)
+            self._action_buffer.clear()
+            with torch.no_grad():
+                result = self.engine.generate(conditions)
+            self._record_sync_inference()
+            self._unpack_result(result, skip_steps=0)
+            if not self._action_buffer:
+                raise RuntimeError("Failed to generate action chunk")
+            actions = np.stack([np.asarray(a, dtype=np.float32) for a in self._action_buffer], axis=0)
+            self._action_buffer.clear()
+            self._current_step += int(actions.shape[0])
+            return actions
+
     def _refill_buffer(self, conditions: dict):
         """Fill the action buffer, waiting for pending inference if needed."""
         if self._pending_future is not None:

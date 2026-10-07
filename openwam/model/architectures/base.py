@@ -1165,13 +1165,31 @@ class BaseWAMArchitecture(ABC, nn.Module):
         video_timesteps = vb.scheduler.timesteps[video_timestep_ids].to(dtype=_dtype, device=_device)
         video_sigmas = vb.scheduler.sigmas[video_timestep_ids].to(dtype=_dtype, device=_device)
 
+        # --- VRTC: expand clean video prefix beyond the single TI2V condition frame ---
+        vrtc_clear_latents = int(inputs.pop("vrtc_clear_latent_frames", 0) or 0)
+        vrtc_clear_actions = int(inputs.pop("vrtc_clear_action_steps", 0) or 0)
+        if vrtc_clear_latents > 0:
+            t_lat = inputs["input_latents"].shape[2]
+            if vrtc_clear_latents > t_lat:
+                raise ValueError(
+                    f"vrtc_clear_latent_frames ({vrtc_clear_latents}) > latent T ({t_lat})"
+                )
+            inputs["first_frame_latents"] = inputs["input_latents"][:, :, :vrtc_clear_latents].clone()
+            inputs["fuse_vae_embedding_in_latents"] = True
+            # TI2V time-modulation uses max(num_clean_prefix_frames, 1); set explicitly
+            # so clear future latent frames also get t=0.
+            inputs["num_clean_prefix_frames"] = vrtc_clear_latents
+
         # --- Add video noise (flow-matching: linear interp + velocity target) ---
         sigma_bc = video_sigmas.view(B, 1, 1, 1, 1)
         inputs["latents"] = (1 - sigma_bc) * inputs["input_latents"] + sigma_bc * video_noise
         video_target = video_noise - inputs["input_latents"]
 
-        if inputs.get("first_frame_latents") is not None:
-            inputs["latents"][:, :, 0:1] = inputs["first_frame_latents"]
+        ref_latents = inputs.get("first_frame_latents")
+        if ref_latents is not None:
+            # Pin the full clean prefix (1 frame by default; VRTC may pin more).
+            inputs["latents"] = inputs["latents"].clone()
+            inputs["latents"][:, :, : ref_latents.shape[2]] = ref_latents
 
         # --- Prepare action noise ---
         noisy_actions, action_target, action_timesteps, action_timestep_ids, action_sigmas, a_sigma_bc = (
@@ -1206,6 +1224,29 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 noisy_actions = action_scheduler.add_noise(actions, action_noise, a_sigma_bc)
                 action_target = action_scheduler.training_target(actions, action_noise)
 
+            # VRTC teacher-force: keep clear action prefix clean and exclude from loss.
+            if vrtc_clear_actions > 0:
+                if vrtc_clear_actions >= actions.shape[1]:
+                    raise ValueError(
+                        f"vrtc_clear_action_steps ({vrtc_clear_actions}) must be < "
+                        f"action T ({actions.shape[1]})"
+                    )
+                noisy_actions = noisy_actions.clone()
+                noisy_actions[:, :vrtc_clear_actions] = actions[:, :vrtc_clear_actions]
+                action_is_pad = inputs.get("action_is_pad")
+                if action_is_pad is None:
+                    action_is_pad = torch.zeros(
+                        actions.shape[0],
+                        actions.shape[1],
+                        actions.shape[2],
+                        dtype=torch.bool,
+                        device=actions.device,
+                    )
+                else:
+                    action_is_pad = action_is_pad.to(device=actions.device, dtype=torch.bool).clone()
+                action_is_pad[:, :vrtc_clear_actions] = True
+                inputs["action_is_pad"] = action_is_pad
+
         # --- Joint forward pass ---
         forward_inputs = dict(inputs)
         proprio = forward_inputs.pop("proprio", None)
@@ -1217,6 +1258,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # MoT design, attention itself does not consume sample-level padding.
         forward_inputs.pop("action_is_pad", None)
         forward_inputs.pop("video_is_pad", None)
+        forward_inputs.pop("vrtc_clear_latent_frames", None)
+        forward_inputs.pop("vrtc_clear_action_steps", None)
 
         # Route per-sample proprio_mask through pipeline_inputs to
         # ``_append_proprio_context_token``. Internal-only key; pop'd there.
@@ -1328,13 +1371,20 @@ class BaseWAMArchitecture(ABC, nn.Module):
         per_frame = per_element.mean(dim=(1, 3, 4))
 
         if video_is_pad is not None:
-            if video_is_pad.shape[-1] != noise_pred.shape[2]:
+            video_is_pad = video_is_pad.to(device=per_frame.device, dtype=torch.bool)
+            t_pred = int(noise_pred.shape[2])
+            # ``video_is_pad`` is usually sized to T_lat minus the *single* TI2V
+            # conditioning latent (skip_first=1). VRTC may skip additional clean
+            # prefix latents in the loss; align by keeping the trailing supervised
+            # slots (noisy future), which match the remaining pad-mask tail.
+            if video_is_pad.shape[-1] > t_pred:
+                video_is_pad = video_is_pad[..., -t_pred:]
+            if video_is_pad.shape[-1] != t_pred:
                 raise ValueError(
                     f"video_is_pad length {video_is_pad.shape[-1]} does not match "
-                    f"trimmed noise_pred T={noise_pred.shape[2]} (n_skip={n_skip}). "
+                    f"trimmed noise_pred T={t_pred} (n_skip={n_skip}). "
                     "Expected mask sized to T_lat minus leading conditioning latents."
                 )
-            video_is_pad = video_is_pad.to(device=per_frame.device, dtype=torch.bool)
             valid_mask = ~video_is_pad
             per_frame = per_frame * valid_mask.float()
             valid_count = valid_mask.float().sum(dim=1).clamp(min=1)
@@ -1497,6 +1547,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         vace_cache: Optional[dict] = None,
         prompt_embed_cache: Optional[dict] = None,
         proprio: Optional[Tensor] = None,
+        action_prefix: Optional[Tensor] = None,
         cfg_scale: float = 1.0,
         cfg_merge: bool = False,
         active_action_mask: Optional[Tensor] = None,
@@ -1518,6 +1569,9 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 benchmark being generated. Inactive unified-action dimensions
                 stay on their analytic zero-padding noise path. When omitted,
                 the mask is inferred from the attached unified normalizer.
+            action_prefix: Optional clean action prefix ``(T_clear, action_dim)``
+                or ``(1, T_clear, action_dim)`` in model space. Used by VRTC to
+                teacher-force the clear future actions during denoising.
 
         Returns:
             dict with ``video`` (list of PIL images or None) and
@@ -1609,6 +1663,28 @@ class BaseWAMArchitecture(ABC, nn.Module):
             generator=torch.Generator(device=device).manual_seed(seed),
         )
 
+        # Optional VRTC / teacher-force action prefix (model-space, already normalized).
+        action_prefix_t = None
+        if action_prefix is not None:
+            action_prefix_t = torch.as_tensor(action_prefix, device=device, dtype=dtype)
+            if action_prefix_t.dim() == 2:
+                action_prefix_t = action_prefix_t.unsqueeze(0)
+            if action_prefix_t.dim() != 3 or action_prefix_t.shape[0] != 1:
+                raise ValueError(
+                    f"action_prefix must have shape (T, D) or (1, T, D); got {tuple(action_prefix_t.shape)}"
+                )
+            if action_prefix_t.shape[-1] != self.action_dim:
+                raise ValueError(
+                    f"action_prefix dim {action_prefix_t.shape[-1]} != action_dim {self.action_dim}"
+                )
+            n_prefix = int(action_prefix_t.shape[1])
+            if n_prefix >= action_latents.shape[1]:
+                raise ValueError(
+                    f"action_prefix length ({n_prefix}) must be < action horizon ({action_latents.shape[1]})"
+                )
+            action_latents = action_latents.clone()
+            action_latents[:, :n_prefix] = action_prefix_t
+
         # Unified-action checkpoints scatter raw actions into a larger zero-padded
         # space.  The inactive dimensions may be excluded from the training loss,
         # so their predicted flow is unconstrained.  Keep those dimensions on the
@@ -1696,6 +1772,9 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 )
                 if inactive_action_dims is not None:
                     action_latents[..., inactive_action_dims] = inactive_action_noise * float(sigma_a_next)
+                if action_prefix_t is not None:
+                    action_latents = action_latents.clone()
+                    action_latents[:, : action_prefix_t.shape[1]] = action_prefix_t
 
         if profile:
             if torch.cuda.is_available():

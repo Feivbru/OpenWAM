@@ -327,6 +327,11 @@ class JointInferenceEngine(BaseInferenceEngine):
         if proprio is not None:
             proprio = self.architecture.normalize_deploy_proprio(proprio)
 
+        # VRTC clear-action prefix: physical units in → model-space tensor out.
+        action_prefix = conditions.get("action_prefix")
+        if action_prefix is not None:
+            action_prefix = self.architecture.normalize_deploy_proprio(action_prefix)
+
         action_num_frames = int(conditions.get("num_frames", getattr(inf_cfg, "num_frames", 49)))
         video_num_frames = int(
             conditions.get(
@@ -356,6 +361,7 @@ class JointInferenceEngine(BaseInferenceEngine):
                 "vace_cache": self._vace_cache,
                 "prompt_embed_cache": self._prompt_embed_cache,
                 "proprio": proprio,
+                "action_prefix": action_prefix,
                 "cfg_scale": self._cfg_scale,
                 "cfg_merge": self._cfg_merge,
             }

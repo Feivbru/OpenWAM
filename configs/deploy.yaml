@@ -4,6 +4,10 @@ device: cuda:0
 server:
   host: "0.0.0.0"
   port: 8848                   # WebSocket port (openwam JSON protocol)
+  # When true, each obs response includes the full executable action chunk as
+  # ``actions`` (and ``action`` = first step). The server clears its buffer so
+  # the client owns open-loop execution. Default false = one action per obs.
+  return_action_chunk: false
 
 # Piper / openpi-client wire protocol (``--protocol openpi``). See README_piper.md.
 piper_openpi:
@@ -26,6 +30,10 @@ inference:
   inference_mode: sync       # executor: sync | async; separate from denoise_mode
   inference_horizon: null       # sync/async: actions executed per generated chunk; null = full chunk
   inference_delay_steps: null # inference_mode=async only: expected latency in action steps
+
+# VRTC is read from the training ckpt config (vrtc.enabled). Do not put a default
+# vrtc.enabled=false here — merge_deploy_cfg lets deploy win and would silently
+# disable VRTC checkpoints. Override only when needed, e.g. `vrtc.enabled=false`.
 
 # --- Deploy-time optimizations (cfg.optimization) ---
 optimization:

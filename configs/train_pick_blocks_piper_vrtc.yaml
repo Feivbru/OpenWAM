@@ -1,0 +1,101 @@
+# OpenWAM-α Foundation finetune on pick_blocks Piper with VRTC enabled.
+#
+# Same base as train_pick_blocks_piper.yaml, plus:
+#   vrtc.enabled=true, fu_frames=4
+#   → video clean prefix: condition 1 + clear future 4 (+ noisy future 4)
+#   → action clean prefix: clear future 16 (+ noisy future 16); proprio = state
+#
+# Launch:
+#   bash scripts/train_pick_blocks_piper_vrtc.sh
+#   # or:
+#   torchrun ... scripts/train.py --config-name=train_pick_blocks_piper_vrtc
+
+defaults:
+  - model: dual_system
+  - dataloader: pick_blocks_piper
+  - _self_
+
+training:
+  debug: false
+
+  learning_rate: 1.0e-5
+  adam_betas: [0.9, 0.95]
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  num_epochs: null
+  max_steps: 2000
+  batch_size: 16
+  gradient_accumulation_steps: 1
+
+  lr_scheduler: cosine
+  warmup_ratio: 0.05
+  lr_min_ratio: 0.01
+  action_lr: null
+  video_lr: null
+
+  mixed_precision: bf16
+  zero_stage: 2
+  offload_optimizer_device: none
+
+  use_gradient_checkpointing: false
+  use_gradient_checkpointing_offload: false
+  initialize_model_on_cpu: true
+
+  video_mode: train
+  lambda_video: 1.0
+  lambda_action: 1.0
+  lambda_distill: 0.0
+  use_distill_gate: false
+
+  max_timestep_boundary: 1.0
+  min_timestep_boundary: 0.0
+
+  output_path: outputs/pick_blocks_piper_vrtc
+  save_steps: 5000
+  save_full_states_for_resume: false
+  keep_last_k_ckpts: 1
+
+  finetune_ckpt_path: assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Pretrain-Foundation-Model
+  resume_ckpt_path: null
+
+  dataset_num_workers: 4
+
+dataloader:
+  use_t5_cache: true
+  t5_cache_dirname: umt5_openwam
+  color_jitter:
+    enabled: true
+    brightness: 0.2
+    contrast: 0.2
+    saturation: 0.2
+    hue: 0.0
+
+model:
+  freeze_video_dit: false
+  architecture:
+    mot_checkpoint_mixed_attn: true
+  video_backbone:
+    model_path: /data/zixian_guo/projects/haoming/project/PI/Motus/pretrained_models/Wan2.2-TI2V-5B
+
+fpd:
+  enabled: false
+
+vrtc:
+  enabled: true
+  fu_frames: 4
+  condition_frames: 1
+  # Deploy scheduler: prefetch when remaining wait cubes <= this (0 = sync-only).
+  replan_cubes: 2
+  # Deploy wait-pool merge: replace | average | blend (client may override via ping).
+  merge_mode: replace
+
+project:
+  name: pick_blocks_piper_vrtc
+  output_dir: outputs/pick_blocks_piper_vrtc_${now:%Y%m%d_%H%M%S}
+  seed: 42
+  wandb:
+    project: openwam
+    run_name: pick_blocks_piper_vrtc
+    entity: null
+    mode: online

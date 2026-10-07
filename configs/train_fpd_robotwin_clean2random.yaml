@@ -19,7 +19,7 @@ training:
   max_grad_norm: 1.0
 
   num_epochs: null
-  max_steps: 10000
+  max_steps: 5000
   batch_size: 8
   gradient_accumulation_steps: 1
 
@@ -49,7 +49,7 @@ training:
   min_timestep_boundary: 0.0
 
   output_path: outputs/openwam_fpd_robotwin_clean2random
-  save_steps: 10000
+  save_steps: 5000
   save_full_states_for_resume: false
   keep_last_k_ckpts: 1
 
