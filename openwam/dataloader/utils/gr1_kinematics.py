@@ -56,6 +56,26 @@ EEF33_UNIFY_DST = np.asarray(
 ROT6D_DIMS_EEF33 = tuple(range(3, 9)) + tuple(range(18, 24))
 HAND_DIMS_EEF33 = tuple(range(9, 15)) + tuple(range(24, 30))
 
+# Fourier hand *actions* are discrete velocity commands in the GR00T tabletop
+# demos (state is continuous joint angle). Levels are the observed legal set
+# per dim; left/right are not symmetric in the dataset (right never uses 0).
+FOURIER_LEFT_HAND_LEVELS = (
+    (-1.5, 0.0, 1.5),
+    (-1.5, 0.0, 1.5),
+    (-1.5, 0.0, 1.5),
+    (-1.5, 0.0, 1.5),
+    (-3.0, 0.0, 3.0),
+    (0.0, 3.0),
+)
+FOURIER_RIGHT_HAND_LEVELS = (
+    (-1.5, 1.5),
+    (-1.5, 1.5),
+    (-1.5, 1.5),
+    (-1.5, 1.5),
+    (-3.0, 3.0),
+    (3.0,),
+)
+
 STATE_KEYS = (
     "state.left_arm",
     "state.left_hand",
@@ -70,6 +90,38 @@ ACTION_KEYS = (
     "action.right_hand",
     "action.waist",
 )
+
+
+def _snap_vector_to_levels(values: np.ndarray, levels_per_dim) -> np.ndarray:
+    vec = np.asarray(values, dtype=np.float32).reshape(-1)
+    if vec.shape[0] != len(levels_per_dim):
+        raise ValueError(
+            f"hand command width {vec.shape[0]} != {len(levels_per_dim)} levels"
+        )
+    out = vec.copy()
+    for i, levels in enumerate(levels_per_dim):
+        lv = np.asarray(levels, dtype=np.float32)
+        out[i] = lv[int(np.argmin(np.abs(lv - out[i])))]
+    return out
+
+
+def project_fourier_hand_commands(hand: np.ndarray, *, side: str) -> np.ndarray:
+    """Nearest-neighbor snap of one 6-D Fourier hand command onto legal levels."""
+    if side == "left":
+        levels = FOURIER_LEFT_HAND_LEVELS
+    elif side == "right":
+        levels = FOURIER_RIGHT_HAND_LEVELS
+    else:
+        raise ValueError(f"side must be 'left' or 'right', got {side!r}")
+    return _snap_vector_to_levels(hand, levels)
+
+
+def project_eef33_hand_commands(target: np.ndarray) -> np.ndarray:
+    """Copy EEF33 and snap only the 12 Fourier-hand action dims."""
+    out = np.asarray(target, dtype=np.float32).reshape(EEF33_DIM).copy()
+    out[9:15] = project_fourier_hand_commands(out[9:15], side="left")
+    out[24:30] = project_fourier_hand_commands(out[24:30], side="right")
+    return out
 
 
 def matrix_to_rot6d(matrix: np.ndarray) -> np.ndarray:
@@ -327,11 +379,18 @@ class GR1Kinematics:
         target: np.ndarray,
         *,
         hold_on_failure: bool = True,
+        project_discrete_hands: bool = False,
         **ik_kwargs,
     ) -> tuple[dict[str, np.ndarray], IKSolution]:
-        """Convert EEF33 to the GR00T 29-D action dictionary."""
+        """Convert EEF33 to the GR00T 29-D action dictionary.
+
+        ``project_discrete_hands`` snaps Fourier hand commands onto the legal
+        discrete set used in demos; arm IK still sees the raw continuous target.
+        """
         tgt = np.asarray(target, dtype=np.float32).reshape(EEF33_DIM)
         solution = self.solve_eef33(tgt, **ik_kwargs)
+        if project_discrete_hands:
+            tgt = project_eef33_hand_commands(tgt)
         if not solution.converged and not hold_on_failure:
             raise RuntimeError(
                 f"GR1 IK failed: position_error={solution.position_error:.6f}, "
@@ -357,6 +416,8 @@ __all__ = [
     "EEF33_DIM",
     "EEF33_SLICES",
     "EEF33_UNIFY_DST",
+    "FOURIER_LEFT_HAND_LEVELS",
+    "FOURIER_RIGHT_HAND_LEVELS",
     "GR1Kinematics",
     "IKSolution",
     "JOINT29_DIM",
@@ -366,5 +427,7 @@ __all__ = [
     "STATE_KEYS",
     "matrix_to_rot6d",
     "matrix_to_rotvec",
+    "project_eef33_hand_commands",
+    "project_fourier_hand_commands",
     "rot6d_to_matrix",
 ]

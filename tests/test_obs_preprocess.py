@@ -119,6 +119,48 @@ def test_from_cfg_resolves_view_config():
     assert dec.camera_layout == ["a", "b", "c"]
     assert (dec.img_height, dec.img_width) == (384, 320)
     assert dec.requires_proprio is True
+    assert dec.compose_mode == "lshape"
+
+
+def test_from_cfg_resolves_vstack_compose_mode():
+    from omegaconf import OmegaConf
+
+    cfg = OmegaConf.create(
+        {
+            "dataloader": {
+                "multiview": True,
+                "compose_mode": "vstack",
+                "height": 960,
+                "width": 640,
+            }
+        }
+    )
+    dec = ObsPreprocessor.from_cfg(cfg, engine=None)
+    assert dec.compose_mode == "vstack"
+    assert (dec.img_height, dec.img_width) == (960, 640)
+
+
+def test_vstack_native_pixels_head_over_right_wrist():
+    dec = ObsPreprocessor(
+        multiview=True,
+        camera_layout=["head_camera", "left_camera", "right_camera"],
+        img_height=960,
+        img_width=640,
+        compose_mode="vstack",
+    )
+    obs = dec.preprocess(
+        {
+            "images": {
+                "head_camera": Image.new("RGB", (640, 480), (12, 34, 56)),
+                "right_wrist_camera": Image.new("RGB", (640, 480), (200, 10, 10)),
+            },
+            "prompt": "x",
+        }
+    )
+    assert obs["image"].size == (640, 960)
+    arr = np.asarray(obs["image"])
+    np.testing.assert_array_equal(arr[:480], np.asarray(Image.new("RGB", (640, 480), (12, 34, 56))))
+    np.testing.assert_array_equal(arr[480:], np.asarray(Image.new("RGB", (640, 480), (200, 10, 10))))
 
 
 # --- Pixel-level layout checks (migrated from test_policy_server_obs.py) ---

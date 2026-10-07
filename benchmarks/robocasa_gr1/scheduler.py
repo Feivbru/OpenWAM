@@ -248,7 +248,7 @@ def _encoder_command(args: argparse.Namespace, encoder_port: int) -> list[str]:
 def _batched_server_command(
     args: argparse.Namespace, *, port: int, encoder_port: int, n_slots: int
 ) -> list[str]:
-    return [
+    cmd = [
         str(args.server_python),
         str(ROBOTWIN_DIR / "batched_server.py"),
         "--ckpt-dir",
@@ -272,6 +272,10 @@ def _batched_server_command(
         "--denoise-steps",
         str(args.denoise_steps),
     ]
+    horizon = getattr(args, "inference_horizon", None)
+    if horizon is not None:
+        cmd.extend(["--inference-horizon", str(int(horizon))])
+    return cmd
 
 
 def _start_batched_servers(
@@ -602,6 +606,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--num-episodes", type=int, default=10)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--denoise-steps", type=int, default=10)
+    p.add_argument(
+        "--inference-horizon",
+        type=int,
+        default=None,
+        help="Actions returned per denoise on batched_server (default: deploy.yaml / full chunk)",
+    )
     p.add_argument("--server-start-timeout", type=int, default=900)
     p.add_argument("--client-start-stagger", type=float, default=0.5)
     p.add_argument("--client-max-attempts", type=int, default=2)

@@ -44,6 +44,11 @@ def _parse_optional_int(value, field_name: str) -> int | None:
     return parsed
 
 
+def _parse_optional_action_steps(value, field_name: str) -> int | None:
+    """Like ``_parse_optional_int`` but also accepts YAML null as full-chunk."""
+    return _parse_optional_int(value, field_name)
+
+
 def _make_env(cfg: dict):
     import gymnasium as gym
     import robocasa  # noqa: F401
@@ -102,6 +107,10 @@ def run_eval(cfg: dict) -> int:
         fallback_prompt_key=cfg.get("fallback_prompt_key", "annotation.human.action.task_description"),
         send_state=_require_bool(cfg.get("send_state", True), "send_state"),
         state_dim=_parse_optional_int(cfg.get("state_dim"), "state_dim"),
+        project_discrete_hands=_require_bool(
+            cfg.get("project_discrete_hands", False), "project_discrete_hands"
+        ),
+        n_action_steps=_parse_optional_action_steps(cfg.get("n_action_steps"), "n_action_steps"),
         debug=_require_bool(cfg.get("debug", False), "debug"),
         debug_dir=cfg.get("debug_dir", "./debug_robocasa_gr1"),
     )

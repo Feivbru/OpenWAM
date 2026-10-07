@@ -53,4 +53,20 @@ def smoke_env_ids() -> tuple[str, ...]:
     return OFFICIAL_ENV_IDS[:2]
 
 
-__all__ = ["OFFICIAL_ENV_IDS", "env_short_name", "smoke_env_ids"]
+def split_official_env_ids(n_groups: int = 2) -> list[tuple[str, ...]]:
+    """Partition the 24 official tasks into ``n_groups`` contiguous chunks."""
+    if n_groups < 1:
+        raise ValueError(f"n_groups must be >= 1, got {n_groups}")
+    ids = list(OFFICIAL_ENV_IDS)
+    n = len(ids)
+    base, rem = divmod(n, n_groups)
+    groups: list[tuple[str, ...]] = []
+    cursor = 0
+    for i in range(n_groups):
+        cnt = base + (1 if i < rem else 0)
+        groups.append(tuple(ids[cursor : cursor + cnt]))
+        cursor += cnt
+    return groups
+
+
+__all__ = ["OFFICIAL_ENV_IDS", "env_short_name", "smoke_env_ids", "split_official_env_ids"]

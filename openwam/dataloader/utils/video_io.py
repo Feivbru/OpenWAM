@@ -54,7 +54,14 @@ def _warn_seek_fallback(video_path: str, min_idx: int, max_idx: int, reason: str
         )
 
 
-def decode_video_frames(video_path: str, frame_indices: List[int], height: int, width: int) -> List[Image.Image]:
+def decode_video_frames(
+    video_path: str,
+    frame_indices: List[int],
+    height: int,
+    width: int,
+    *,
+    keep_native: bool = False,
+) -> List[Image.Image]:
     """Decode requested frames via PyAV with seek-to-keyframe optimization.
 
     Repacked file-NNN.mp4 can hold many episodes, so decoding sequentially from
@@ -66,6 +73,9 @@ def decode_video_frames(video_path: str, frame_indices: List[int], height: int, 
 
     No fallback chain (decord / cv2): mp4s are byte-exact stream copy from
     validated upstream encodes; pyav failures are real bugs we want to see.
+
+    ``keep_native=True`` returns decoded PIL frames as-is (no ``Image.resize``).
+    ``height`` / ``width`` are ignored in that mode.
     """
     if not frame_indices:
         return []
@@ -136,6 +146,8 @@ def decode_video_frames(video_path: str, frame_indices: List[int], height: int, 
     missing = set(frame_indices) - idx_map.keys()
     if missing:
         raise RuntimeError(f"missing frames {missing} in {video_path}")
+    if keep_native:
+        return [idx_map[i] for i in frame_indices]
     return [idx_map[i].resize((width, height), Image.LANCZOS) for i in frame_indices]
 
 

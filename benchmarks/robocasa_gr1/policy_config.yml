@@ -40,6 +40,12 @@ fallback_prompt_key: annotation.human.action.task_description
 # contract and is not configurable.
 send_state: true
 state_dim: 33
+# Snap Fourier hand commands onto demo-legal discrete levels (left
+# {-1.5,0,1.5}/{-3,0,3}/{0,3}, right {-1.5,1.5}/{-3,3}/{3}). false = passthrough.
+project_discrete_hands: false
+# Execute only the first N actions from each predicted chunk, then re-query
+# (GR00T RoboCasa GR1 eval uses n_action_steps=8). null = full chunk.
+n_action_steps: 8
 
 debug: false
 debug_dir: "./debug_robocasa_gr1"

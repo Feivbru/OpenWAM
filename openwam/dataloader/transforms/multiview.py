@@ -113,6 +113,62 @@ def assemble_multiview_layout(
     return canvas
 
 
+def assemble_vstack_native(
+    top: Image.Image | None,
+    bottom: Image.Image | None,
+    *,
+    fallback_size: Tuple[int, int] | None = None,
+    return_missing_mask: bool = False,
+) -> Union[Image.Image, Tuple[Image.Image, Image.Image]]:
+    """Stack two images vertically without resizing.
+
+    Each pane keeps its native ``(width, height)``. If widths differ, the canvas
+    uses ``max(widths)`` and the narrower pane is left-aligned with black pad
+    on the right (no stretch). A missing pane is replaced by a black image of
+    ``fallback_size`` (PIL ``(width, height)``).
+
+    Args:
+        top / bottom: PIL images, or ``None`` for a black placeholder.
+        fallback_size: ``(width, height)`` used when a pane is missing.
+        return_missing_mask: Also return an ``L`` mask (255 = structural pad /
+            missing pane) so color jitter can skip those pixels.
+
+    Returns:
+        PIL RGB image. If ``return_missing_mask``, ``(image, mask)``.
+    """
+
+    def _pane(im: Image.Image | None) -> Tuple[Image.Image, bool]:
+        if im is None:
+            if fallback_size is None:
+                raise ValueError("assemble_vstack_native: missing pane requires fallback_size")
+            return Image.new("RGB", fallback_size, (0, 0, 0)), True
+        if im.mode != "RGB":
+            im = im.convert("RGB")
+        return im, False
+
+    top_im, top_missing = _pane(top)
+    bot_im, bot_missing = _pane(bottom)
+    max_w = max(top_im.size[0], bot_im.size[0])
+    total_h = top_im.size[1] + bot_im.size[1]
+    canvas = Image.new("RGB", (max_w, total_h), (0, 0, 0))
+    missing_mask = Image.new("L", (max_w, total_h), 0) if return_missing_mask else None
+
+    y = 0
+    for pane, is_missing in ((top_im, top_missing), (bot_im, bot_missing)):
+        pw, ph = pane.size
+        canvas.paste(pane, (0, y))
+        if missing_mask is not None:
+            if is_missing:
+                missing_mask.paste(255, (0, y, max_w, y + ph))
+            elif pw < max_w:
+                missing_mask.paste(255, (pw, y, max_w, y + ph))
+        y += ph
+
+    if missing_mask is not None:
+        return canvas, missing_mask
+    return canvas
+
+
 def format_prompt_for_inference(base_prompt: str) -> str:
     """RoboTwin training-time prompt template.
 
@@ -129,5 +185,6 @@ __all__ = [
     "DEFAULT_MULTIVIEW_CAMERA_LAYOUT",
     "crop_and_resize",
     "assemble_multiview_layout",
+    "assemble_vstack_native",
     "format_prompt_for_inference",
 ]

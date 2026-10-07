@@ -538,11 +538,19 @@ def main() -> None:
         help="Max slots per generate_batch call (0 = all ready). Use 1-4 when sharing GPU with encoder.",
     )
     parser.add_argument("--denoise-steps", type=int, default=None)
+    parser.add_argument(
+        "--inference-horizon",
+        type=int,
+        default=None,
+        help="Actions returned per denoise (null/omit = full chunk). Aligns with GR00T n_action_steps.",
+    )
     args = parser.parse_args()
     if args.n_slots < 1:
         parser.error("--n-slots must be >= 1")
     if args.max_batch < 0:
         parser.error("--max-batch must be >= 0")
+    if args.inference_horizon is not None and args.inference_horizon < 1:
+        parser.error("--inference-horizon must be >= 1 when set")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
@@ -561,6 +569,8 @@ def main() -> None:
     cfg = _load_deploy_yaml(args.config)
     if args.denoise_steps is not None:
         OmegaConf.update(cfg, "inference.denoise_steps", int(args.denoise_steps), merge=False)
+    if args.inference_horizon is not None:
+        OmegaConf.update(cfg, "inference.inference_horizon", int(args.inference_horizon), merge=False)
     _validate_inference_config(cfg)
     _normalize_compile_enabled_in_cfg(cfg)
     _apply_compile_enabled_override(cfg, None)

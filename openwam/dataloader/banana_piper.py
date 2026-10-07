@@ -142,8 +142,11 @@ class BananaPiperDataset(LeRobotV3Reader):
         # Single wrist camera sits in the right L-shape slot; left stays black.
         return head, None, wrist
 
+    def _expected_canvas_hw(self) -> Tuple[int, int]:
+        return (384, 320) if self._multiview else (256, 320)
+
     def _post_init(self, info: dict) -> None:
-        expected_size = (384, 320) if self._multiview else (256, 320)
+        expected_size = self._expected_canvas_hw()
         if (self._height, self._width) != expected_size:
             mode = "multiview" if self._multiview else "single-view"
             raise ValueError(
