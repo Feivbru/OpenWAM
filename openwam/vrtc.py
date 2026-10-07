@@ -14,6 +14,9 @@ from typing import Any, Optional
 
 WAN_TEMPORAL_FACTOR = 4
 
+# How newly predicted wait cubes combine with cubes already in the wait pool.
+VRTC_MERGE_MODES = ("replace", "average", "blend")
+
 
 @dataclass(frozen=True)
 class VrtcConfig:
@@ -27,8 +30,16 @@ class VrtcConfig:
     temporal_factor: int = WAN_TEMPORAL_FACTOR
     # Prefetch when ``len(wait_pool) <= replan_cubes`` (0 = sync: only when empty).
     replan_cubes: int = 2
+    # Wait-pool merge on INFER_MERGE: replace | average | blend (within-cube ramp).
+    merge_mode: str = "replace"
 
     def __post_init__(self) -> None:
+        mode = str(self.merge_mode).strip().lower()
+        object.__setattr__(self, "merge_mode", mode)
+        if mode not in VRTC_MERGE_MODES:
+            raise ValueError(
+                f"vrtc.merge_mode must be one of {VRTC_MERGE_MODES}, got {self.merge_mode!r}"
+            )
         if not self.enabled:
             return
         if self.fu_frames <= 0:
@@ -147,6 +158,7 @@ def resolve_vrtc_config(cfg: Any = None, *, overrides: Optional[dict] = None) ->
         video_stride = _select(cfg, "inference.video_stride", 4)
 
     replan_cubes = overrides.get("replan_cubes", _select(cfg, "vrtc.replan_cubes", 2))
+    merge_mode = overrides.get("merge_mode", _select(cfg, "vrtc.merge_mode", "replace"))
 
     return VrtcConfig(
         enabled=bool(enabled),
@@ -155,4 +167,5 @@ def resolve_vrtc_config(cfg: Any = None, *, overrides: Optional[dict] = None) ->
         num_frames=int(num_frames),
         video_stride=int(video_stride or 1),
         replan_cubes=int(replan_cubes),
+        merge_mode=str(merge_mode),
     )

@@ -17,7 +17,7 @@ import logging
 import threading
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -78,11 +78,12 @@ class VrtcSyncExecutor:
         self._closed: bool = False
 
         logger.info(
-            "VrtcSyncExecutor: warmup=%d predict=%d stride=%d replan_cubes=%d",
+            "VrtcSyncExecutor: warmup=%d predict=%d stride=%d replan_cubes=%d merge_mode=%s",
             vrtc.pool_warmup_cubes,
             vrtc.predict_cubes,
             vrtc.video_stride,
             vrtc.replan_cubes,
+            vrtc.merge_mode,
         )
 
     # ------------------------------------------------------------------
@@ -117,6 +118,38 @@ class VrtcSyncExecutor:
             self._action_buffer.clear()
             self._last_prompt = ""
             self._last_delivered = None
+
+    def set_replan_cubes(self, replan_cubes: int) -> VrtcConfig:
+        """Update prefetch threshold; validated by :class:`VrtcConfig`.
+
+        Safe to call between cubes. Does not clear pools; the new threshold
+        applies on the next ``_maybe_start_replan_locked`` check.
+        """
+        new_cfg = replace(self.vrtc, replan_cubes=int(replan_cubes))
+        with self._cv:
+            old = int(self.vrtc.replan_cubes)
+            self.vrtc = new_cfg
+        if old != new_cfg.replan_cubes:
+            logger.info(
+                "VrtcSyncExecutor: replan_cubes %d -> %d",
+                old,
+                new_cfg.replan_cubes,
+            )
+        return new_cfg
+
+    def set_merge_mode(self, merge_mode: str) -> VrtcConfig:
+        """Update wait-pool merge strategy (``replace`` / ``average`` / ``blend``)."""
+        new_cfg = replace(self.vrtc, merge_mode=str(merge_mode))
+        with self._cv:
+            old = str(self.vrtc.merge_mode)
+            self.vrtc = new_cfg
+        if old != new_cfg.merge_mode:
+            logger.info(
+                "VrtcSyncExecutor: merge_mode %s -> %s",
+                old,
+                new_cfg.merge_mode,
+            )
+        return new_cfg
 
     def shutdown(self) -> None:
         with self._cv:
@@ -288,16 +321,64 @@ class VrtcSyncExecutor:
             skip = max(0, self._last_delivered.seq - job.origin_last_clear_seq)
         kept = predicted[skip:]
         old = [c.seq for c in self.wait_pool]
-        self.wait_pool = list(kept)
+        mode = str(self.vrtc.merge_mode)
+        self.wait_pool = self._merge_wait_cubes(kept)
         logger.info(
-            "VRTC INFER_MERGE job#%d pred_seqs=%s skip=%d old_wait=%s -> wait=%s",
+            "VRTC INFER_MERGE job#%d pred_seqs=%s skip=%d mode=%s old_wait=%s -> wait=%s",
             job.job_id,
             [c.seq for c in predicted],
             skip,
+            mode,
             old,
             [c.seq for c in self.wait_pool],
         )
         # Replan is armed by the request thread after drain/deliver — never here.
+
+    def _merge_wait_cubes(self, kept: List[Cube]) -> List[Cube]:
+        """Combine newly predicted cubes with the current wait pool.
+
+        * ``replace``: overwrite (default).
+        * ``average``: per-seq mean of overlapping cube actions.
+        * ``blend``: within each overlapping cube, ramp old→new over stride
+          (front steps closer to old, back steps closer to new).
+        Cubes only present in ``kept`` are taken as-is.
+        """
+        mode = str(self.vrtc.merge_mode)
+        if mode == "replace" or not self.wait_pool:
+            return list(kept)
+
+        old_by_seq = {c.seq: c for c in self.wait_pool}
+        out: List[Cube] = []
+        for new_c in kept:
+            old_c = old_by_seq.get(new_c.seq)
+            if old_c is None:
+                out.append(new_c)
+                continue
+            old_a = np.asarray(old_c.actions, dtype=np.float32)
+            new_a = np.asarray(new_c.actions, dtype=np.float32)
+            if old_a.shape != new_a.shape:
+                logger.warning(
+                    "VRTC merge seq=%d shape mismatch old=%s new=%s; using replace",
+                    new_c.seq,
+                    old_a.shape,
+                    new_a.shape,
+                )
+                actions = new_a
+            elif mode == "average":
+                actions = 0.5 * old_a + 0.5 * new_a
+            elif mode == "blend":
+                actions = _blend_cube_actions(old_a, new_a)
+            else:
+                actions = new_a
+            out.append(
+                Cube(
+                    frame=new_c.frame,
+                    actions=np.asarray(actions, dtype=np.float32).copy(),
+                    state=None if new_c.state is None else np.asarray(new_c.state, dtype=np.float32).copy(),
+                    seq=new_c.seq,
+                )
+            )
+        return out
 
     def _cancel_pending_locked(self) -> None:
         if self._pending is None:
@@ -394,6 +475,20 @@ class VrtcSyncExecutor:
         if proprio is None:
             raise ValueError("VRTC executor requires proprio/state")
         return frame, np.asarray(proprio, dtype=np.float32)
+
+
+def _blend_cube_actions(old_a: np.ndarray, new_a: np.ndarray) -> np.ndarray:
+    """Ramp from old→new along the cube's action axis (front=old, back=new)."""
+    old_a = np.asarray(old_a, dtype=np.float32)
+    new_a = np.asarray(new_a, dtype=np.float32)
+    t = int(old_a.shape[0])
+    if t <= 0:
+        return new_a.copy()
+    if t == 1:
+        alpha = np.array([0.5], dtype=np.float32)
+    else:
+        alpha = np.linspace(0.0, 1.0, t, dtype=np.float32)
+    return (1.0 - alpha[:, None]) * old_a + alpha[:, None] * new_a
 
 
 def build_vrtc_executor(engine, cfg) -> Optional[VrtcSyncExecutor]:

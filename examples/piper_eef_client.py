@@ -63,6 +63,100 @@ EEF10_DIM = 10
 PIPER_CONTROL_FREQUENCY = 30.0
 
 
+class ChunkControlPacer:
+    """Pace control steps; optional dynamic Hz that absorbs server RTT.
+
+    Fixed mode: each step sleeps to ``1 / control_hz``.
+
+    Dynamic mode (chunk fetch): after a server round-trip of ``interact_s`` that
+    returns ``N`` actions, set
+
+        step_period = max(0, N / control_hz - interact_s) / N
+
+    so ``interact_s + N * step_period ≈ N / control_hz``. Open-loop execution
+    Hz is then slightly above the nominal ``control_hz`` whenever RTT > 0.
+    """
+
+    def __init__(self, control_hz: float, *, dynamic: bool = False) -> None:
+        if control_hz <= 0:
+            raise ValueError("control_hz must be > 0.")
+        self.control_hz = float(control_hz)
+        self.dynamic = bool(dynamic)
+        self._nominal_period = 1.0 / self.control_hz
+        self._step_period = self._nominal_period
+        self._deadline: Optional[float] = None
+        self._steps_left_in_chunk = 0
+
+    @property
+    def policy_step_period(self) -> float:
+        """Period allocated to one policy action (before interpolation substeps)."""
+        if self.dynamic and self._steps_left_in_chunk > 0:
+            return float(self._step_period)
+        return float(self._nominal_period)
+
+    def note_chunk_fetch(self, n: int, interact_s: float) -> None:
+        """Record a fresh chunk of ``n`` actions that cost ``interact_s`` on the wire."""
+        if not self.dynamic:
+            return
+        n = int(n)
+        if n < 1:
+            raise ValueError("chunk length must be >= 1.")
+        budget = n / self.control_hz
+        interact_s = max(0.0, float(interact_s))
+        exec_budget = budget - interact_s
+        if exec_budget <= 0:
+            logger.warning(
+                "dynamic-control-hz: server interact %.3fs >= chunk budget %.3fs "
+                "(N=%d, control_hz=%.3f); open-loop period clamped to 0.",
+                interact_s,
+                budget,
+                n,
+                self.control_hz,
+            )
+            self._step_period = 0.0
+        else:
+            self._step_period = exec_budget / n
+        self._steps_left_in_chunk = n
+        self._deadline = None
+        logger.info(
+            "dynamic-control-hz: N=%d interact=%.3fs budget=%.3fs "
+            "step_period=%.4fs (exec_hz≈%.2f, nominal=%.2f)",
+            n,
+            interact_s,
+            budget,
+            self._step_period,
+            (1.0 / self._step_period) if self._step_period > 0 else float("inf"),
+            self.control_hz,
+        )
+
+    def consume_policy_step(self) -> None:
+        """Advance dynamic-chunk accounting after one policy action is fully sent."""
+        if not self.dynamic or self._steps_left_in_chunk <= 0:
+            return
+        self._steps_left_in_chunk -= 1
+        if self._steps_left_in_chunk <= 0:
+            self._deadline = None
+            self._step_period = self._nominal_period
+
+    def wait_after_step(self, step_start: float) -> None:
+        """Sleep so this control tick respects the active period / chunk deadline."""
+        if not self.dynamic or self._steps_left_in_chunk <= 0:
+            elapsed = time.monotonic() - step_start
+            if elapsed < self._nominal_period:
+                time.sleep(self._nominal_period - elapsed)
+            return
+
+        now = time.monotonic()
+        if self._deadline is None:
+            # Start open-loop deadlines after the just-finished step work so
+            # server RTT is outside the N * step_period window.
+            self._deadline = now + self._step_period
+        if now < self._deadline:
+            time.sleep(self._deadline - now)
+        self._deadline += self._step_period
+        self.consume_policy_step()
+
+
 # ---------------------------------------------------------------------------
 # Image / camera helpers
 # ---------------------------------------------------------------------------
@@ -234,6 +328,128 @@ class CameraVisualizer:
             self._window_created = False
 
 
+def _stack_cameras_vertical(head_rgb: np.ndarray, wrist_rgb: np.ndarray) -> np.ndarray:
+    """Stack head (top) + wrist (bottom); resize wrist to head width if needed."""
+    import cv2
+
+    head = _as_uint8_rgb(head_rgb)
+    wrist = _as_uint8_rgb(wrist_rgb)
+    if head.shape[1] != wrist.shape[1]:
+        new_h = max(1, int(round(wrist.shape[0] * (head.shape[1] / wrist.shape[1]))))
+        wrist = cv2.resize(wrist, (head.shape[1], new_h))
+    elif head.shape[0] != wrist.shape[0]:
+        # Same width already; keep native heights for vertical concat.
+        pass
+    return np.concatenate([head, wrist], axis=0)
+
+
+class EpisodeVideoRecorder:
+    """Write a vertically stacked dual-camera episode video at a fixed Hz.
+
+    Overlay (top-right): open-loop interaction index, 0-based — increments each
+    time the client fetches a new action chunk from the server (or each server
+    step when not in ``--return-action-chunk`` mode).
+    """
+
+    def __init__(self, path: str | Path, *, hz: float = 5.0) -> None:
+        if hz <= 0:
+            raise ValueError("save_video_hz must be > 0.")
+        import cv2
+
+        self._cv2 = cv2
+        self.path = Path(path)
+        self.hz = float(hz)
+        self._period = 1.0 / self.hz
+        self._writer = None
+        self._size: Optional[tuple[int, int]] = None  # (w, h)
+        self._last_write_t: Optional[float] = None
+        self._frames_written = 0
+        self._interact_idx = 0  # currently displayed open-loop index
+        self._next_interact_idx = 0  # assigned on the next server fetch
+
+    @property
+    def interact_idx(self) -> int:
+        return int(self._interact_idx)
+
+    def note_interact(self) -> int:
+        """Mark a new open-loop / server interaction; returns the 0-based index."""
+        self._interact_idx = self._next_interact_idx
+        self._next_interact_idx += 1
+        return self._interact_idx
+
+    def maybe_write(self, head_rgb: np.ndarray, wrist_rgb: np.ndarray) -> None:
+        now = time.monotonic()
+        if self._last_write_t is not None and (now - self._last_write_t) < self._period:
+            return
+        frame_rgb = _stack_cameras_vertical(head_rgb, wrist_rgb)
+        frame_bgr = self._overlay_interact(frame_rgb[..., ::-1].copy())
+        h, w = frame_bgr.shape[:2]
+        if self._writer is None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fourcc = self._cv2.VideoWriter_fourcc(*"mp4v")
+            self._writer = self._cv2.VideoWriter(str(self.path), fourcc, self.hz, (w, h))
+            if not self._writer.isOpened():
+                raise RuntimeError(f"Failed to open VideoWriter at {self.path}")
+            self._size = (w, h)
+            logger.info(
+                "Saving episode video to %s (%.3f Hz, stacked head/wrist vertical)",
+                self.path,
+                self.hz,
+            )
+        assert self._size is not None
+        if (w, h) != self._size:
+            frame_bgr = self._cv2.resize(frame_bgr, self._size)
+        self._writer.write(frame_bgr)
+        self._last_write_t = now
+        self._frames_written += 1
+
+    def _overlay_interact(self, frame_bgr: np.ndarray) -> np.ndarray:
+        label = f"interact {self._interact_idx}"
+        font = self._cv2.FONT_HERSHEY_SIMPLEX
+        scale = max(0.6, frame_bgr.shape[1] / 640.0 * 0.7)
+        thickness = max(1, int(round(scale * 2)))
+        (tw, th), baseline = self._cv2.getTextSize(label, font, scale, thickness)
+        x = max(8, frame_bgr.shape[1] - tw - 12)
+        y = th + 12
+        # Dark box behind text for readability.
+        pad = 6
+        self._cv2.rectangle(
+            frame_bgr,
+            (x - pad, y - th - pad),
+            (x + tw + pad, y + baseline + pad),
+            (0, 0, 0),
+            thickness=-1,
+        )
+        self._cv2.putText(
+            frame_bgr,
+            label,
+            (x, y),
+            font,
+            scale,
+            (255, 255, 255),
+            thickness,
+            self._cv2.LINE_AA,
+        )
+        return frame_bgr
+
+    def close(self) -> None:
+        if self._writer is not None:
+            self._writer.release()
+            self._writer = None
+            logger.info(
+                "Episode video closed: %s (%d frames @ %.3f Hz, last interact=%d)",
+                self.path,
+                self._frames_written,
+                self.hz,
+                self._interact_idx,
+            )
+
+
+def default_save_video_path() -> Path:
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    return _ROOT / "runs" / f"piper_eef_{stamp}.mp4"
+
+
 # ---------------------------------------------------------------------------
 # EEF10 ↔ Piper EndPoseCtrl
 # ---------------------------------------------------------------------------
@@ -339,6 +555,89 @@ def rot6d_to_rotation_matrix(rot6d: np.ndarray) -> np.ndarray:
     b2 = a2_proj / n2
     b3 = np.cross(b1, b2)
     return np.stack([b1, b2, b3], axis=1)
+
+
+def lerp_eef10(a: np.ndarray, b: np.ndarray, alpha: float) -> np.ndarray:
+    """Interpolate EEF10: xyz/gripper linear; rot6d via matrix lerp + orthonormalize.
+
+    Mirrors ``infer/example/main.py`` setpoint blending, with a safer rotation path
+    than raw rot6d lerp.
+    """
+    a = np.asarray(a, dtype=np.float32).reshape(EEF10_DIM)
+    b = np.asarray(b, dtype=np.float32).reshape(EEF10_DIM)
+    t = float(np.clip(alpha, 0.0, 1.0))
+    out = np.empty(EEF10_DIM, dtype=np.float32)
+    out[:3] = (1.0 - t) * a[:3] + t * b[:3]
+    out[-1] = (1.0 - t) * a[-1] + t * b[-1]
+    try:
+        ra = rot6d_to_rotation_matrix(a[3:9])
+        rb = rot6d_to_rotation_matrix(b[3:9])
+        r = (1.0 - t) * ra + t * rb
+        # Re-orthonormalize blended columns (same convention as rot6d_to_rotation_matrix).
+        c0 = r[:, 0]
+        n0 = np.linalg.norm(c0)
+        if n0 < 1e-8:
+            out[3:9] = b[3:9]
+        else:
+            c0 = c0 / n0
+            c1 = r[:, 1] - np.dot(c0, r[:, 1]) * c0
+            n1 = np.linalg.norm(c1)
+            if n1 < 1e-8:
+                out[3:9] = b[3:9]
+            else:
+                c1 = c1 / n1
+                out[3:9] = rotation_matrix_to_rot6d(np.stack([c0, c1, np.cross(c0, c1)], axis=1))
+    except ValueError:
+        out[3:9] = b[3:9]
+    return out
+
+
+def send_action_interpolated(
+    arm: "PiperArmEEF",
+    previous: np.ndarray,
+    target: np.ndarray,
+    *,
+    substeps: int,
+    step_period: float,
+) -> None:
+    """Send ``substeps`` setpoints between ``previous`` and ``target`` (main.py style)."""
+    substeps = max(1, int(substeps))
+    previous = np.asarray(previous, dtype=np.float32).reshape(EEF10_DIM)
+    target = np.asarray(target, dtype=np.float32).reshape(EEF10_DIM)
+    if substeps == 1:
+        arm.send_action(target)
+        return
+    sub_period = max(0.0, float(step_period) / substeps)
+    next_send = time.monotonic()
+    for i in range(1, substeps + 1):
+        now = time.monotonic()
+        if now < next_send:
+            time.sleep(next_send - now)
+        arm.send_action(lerp_eef10(previous, target, i / substeps))
+        next_send += sub_period
+
+
+def boundary_blend_chunk(
+    chunk: list[np.ndarray],
+    anchor: np.ndarray,
+    *,
+    blend_steps: int,
+) -> list[np.ndarray]:
+    """Blend the head of a freshly received chunk toward ``anchor`` (last command).
+
+    Step ``i`` (0-based) uses ``alpha=(i+1)/n`` so the front stays closer to the
+    previous command and the blend window ends on the raw new action. Helps
+    absorb cube-boundary jumps / "retract then re-descend" from stale replans.
+    """
+    if blend_steps <= 0 or not chunk:
+        return chunk
+    anchor = np.asarray(anchor, dtype=np.float32).reshape(EEF10_DIM)
+    n = min(int(blend_steps), len(chunk))
+    out = list(chunk)
+    for i in range(n):
+        alpha = (i + 1) / n
+        out[i] = lerp_eef10(anchor, np.asarray(out[i], dtype=np.float32), alpha)
+    return out
 
 
 def eef10_to_end_pose_sdk_units(action: np.ndarray) -> tuple[int, int, int, int, int, int]:
@@ -540,16 +839,22 @@ class OpenWAMPiperPolicy:
         resize_lshape: bool = True,
         return_action_chunk: bool = False,
         open_loop_horizon: Optional[int] = None,
+        replan_cubes: Optional[int] = None,
+        merge_mode: Optional[str] = None,
     ) -> None:
         self._client = WSPolicyClient(f"ws://{host}:{port}", timeout=request_timeout)
         self._resize_lshape = bool(resize_lshape)
         self._return_action_chunk = bool(return_action_chunk)
         self._open_loop_horizon = int(open_loop_horizon) if open_loop_horizon is not None else None
+        self._replan_cubes = int(replan_cubes) if replan_cubes is not None else None
+        self._merge_mode = str(merge_mode).strip().lower() if merge_mode is not None else None
         self._pending: list[np.ndarray] = []
         self._pending_idx = 0
         self._server_return_action_chunk: Optional[bool] = None
+        # Set when predict() fetched a new chunk: (chunk_len, interact_s).
+        self._last_chunk_fetch: Optional[tuple[int, float]] = None
 
-        pong = self._client.ping()
+        pong = self._client.ping(replan_cubes=self._replan_cubes, merge_mode=self._merge_mode)
         if pong.get("type") != "pong":
             raise RuntimeError(f"OpenWAM server ping returned unexpected response: {pong}")
         if "return_action_chunk" in pong:
@@ -566,14 +871,36 @@ class OpenWAMPiperPolicy:
                     "extra 'actions' fields will be ignored. Pass --return-action-chunk "
                     "on the client to open-loop locally."
                 )
+        server_vrtc = pong.get("vrtc") if isinstance(pong.get("vrtc"), dict) else None
+        if self._replan_cubes is not None or self._merge_mode is not None:
+            if not server_vrtc or not server_vrtc.get("enabled"):
+                raise RuntimeError(
+                    "Client sent VRTC ping overrides, but the server did not advertise "
+                    "VRTC on pong. Use a VRTC checkpoint / enable vrtc."
+                )
+        if self._replan_cubes is not None:
+            applied = int(server_vrtc.get("replan_cubes", -1))
+            if applied != self._replan_cubes:
+                raise RuntimeError(
+                    f"Requested replan_cubes={self._replan_cubes} but server pong reports "
+                    f"vrtc.replan_cubes={applied}."
+                )
+        if self._merge_mode is not None:
+            applied_mode = str(server_vrtc.get("merge_mode", "")).strip().lower()
+            if applied_mode != self._merge_mode:
+                raise RuntimeError(
+                    f"Requested merge_mode={self._merge_mode!r} but server pong reports "
+                    f"vrtc.merge_mode={applied_mode!r}."
+                )
         logger.info(
             "Connected to OpenWAM PolicyServer ws://%s:%d "
-            "(representation=%r, client_chunk=%s, server_chunk=%s)",
+            "(representation=%r, client_chunk=%s, server_chunk=%s, vrtc=%s)",
             host,
             port,
             pong.get("representation"),
             self._return_action_chunk,
             self._server_return_action_chunk,
+            server_vrtc,
         )
 
     def reset(self) -> None:
@@ -614,14 +941,17 @@ class OpenWAMPiperPolicy:
 
     def predict(self, head_rgb: np.ndarray, wrist_rgb: Optional[np.ndarray], state: np.ndarray, prompt: str) -> np.ndarray:
         """Return one EEF10 action (step mode, or next open-loop step in chunk mode)."""
+        self._last_chunk_fetch = None
         if self._return_action_chunk and self._pending_idx < len(self._pending):
             action = self._pending[self._pending_idx]
             self._pending_idx += 1
             return action
 
         payload = self._build_payload(head_rgb, wrist_rgb, state, prompt)
+        t0 = time.monotonic()
         with prevent_keyboard_interrupt():
             response = self._client.predict(payload)
+        interact_s = time.monotonic() - t0
 
         if self._return_action_chunk:
             raw_chunk = response.get("actions")
@@ -639,12 +969,24 @@ class OpenWAMPiperPolicy:
                 chunk = chunk[: self._open_loop_horizon]
             self._pending = chunk
             self._pending_idx = 1
-            logger.info("Received EEF10 action chunk with shape (%d, %d).", len(chunk), EEF10_DIM)
+            self._last_chunk_fetch = (len(chunk), interact_s)
+            logger.info(
+                "Received EEF10 action chunk with shape (%d, %d) (server_interact=%.3fs).",
+                len(chunk),
+                EEF10_DIM,
+                interact_s,
+            )
             return chunk[0]
 
         if "action" not in response:
             raise RuntimeError(f"OpenWAM response missing action field: {response}")
         return _as_eef10(response["action"], name="server action")
+
+    def pop_chunk_fetch(self) -> Optional[tuple[int, float]]:
+        """Return ``(N, interact_s)`` once after a chunk fetch, else ``None``."""
+        meta = self._last_chunk_fetch
+        self._last_chunk_fetch = None
+        return meta
 
     def close(self) -> None:
         self._client.close()
@@ -686,8 +1028,60 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--show-cameras", action="store_true")
     p.add_argument("--camera-preview-window", default="Piper cameras (OpenWAM EEF10)")
     p.add_argument("--camera-preview-scale", type=float, default=1.5)
+    p.add_argument(
+        "--save-video",
+        nargs="?",
+        const="__AUTO__",
+        default=None,
+        metavar="PATH",
+        help="Save episode video: head (top) + wrist (bottom), overlay open-loop "
+        "interact index (0-based) at top-right. Omit PATH to write "
+        "runs/piper_eef_<timestamp>.mp4 under the OpenWAM repo root.",
+    )
+    p.add_argument(
+        "--save-video-hz",
+        type=float,
+        default=5.0,
+        help="Frame rate for --save-video (wall-clock throttle; default 5 Hz).",
+    )
     p.add_argument("--max-timesteps", type=int, default=2000)
     p.add_argument("--control-hz", type=float, default=PIPER_CONTROL_FREQUENCY)
+    p.add_argument(
+        "--dynamic-control-hz",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="With --return-action-chunk: pace so server_interact + N*step_period "
+        "≈ N/control_hz (open-loop exec Hz slightly above nominal). "
+        "Default off = fixed 1/control_hz per step.",
+    )
+    p.add_argument(
+        "--interpolation-substeps",
+        type=int,
+        default=1,
+        help="Like infer/example/main.py: linearly blend previous→target EEF10 "
+        "across N robot setpoints per policy action (1=off). Use 4 for smoother motion.",
+    )
+    p.add_argument(
+        "--chunk-xyz-shift",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="After a chunk fetch, re-read state and add xyz delta to the whole "
+        "pending chunk (main.py state_shift idea; EEF absolute poses, xyz only).",
+    )
+    p.add_argument(
+        "--boundary-blend",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="After a chunk fetch, blend the first --boundary-blend-steps actions "
+        "from the last commanded EEF10 toward the new chunk (reduces retract jumps).",
+    )
+    p.add_argument(
+        "--boundary-blend-steps",
+        type=int,
+        default=4,
+        help="With --boundary-blend: number of leading actions to ramp "
+        "(default 4 = one VRTC cube).",
+    )
     p.add_argument("--move-speed-percent", type=int, default=30)
     p.add_argument("--enable-timeout-s", type=float, default=30.0)
     p.add_argument("--gripper-max-m", type=float, default=0.07)
@@ -721,6 +1115,21 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "each chunk (default: use the full returned chunk).",
     )
     p.add_argument(
+        "--replan-cubes",
+        type=int,
+        default=None,
+        help="VRTC only: send replan_cubes on the initial ping so the server "
+        "records the prefetch threshold for this session (0=sync when wait empty).",
+    )
+    p.add_argument(
+        "--merge-mode",
+        choices=("replace", "average", "blend"),
+        default=None,
+        help="VRTC only: wait-pool merge on INFER_MERGE — replace (default on "
+        "server), average overlapping cubes, or blend (within-cube old→new ramp). "
+        "Sent on the initial ping.",
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help="Do not enable Piper / send CAN; still talks to the policy server.",
@@ -745,6 +1154,28 @@ def _validate_args(args: argparse.Namespace) -> None:
             raise ValueError("open_loop_horizon must be >= 1.")
         if not args.return_action_chunk:
             raise ValueError("--open-loop-horizon requires --return-action-chunk.")
+    if args.replan_cubes is not None and args.replan_cubes < 0:
+        raise ValueError("replan_cubes must be >= 0.")
+    if args.dynamic_control_hz and not args.return_action_chunk:
+        raise ValueError("--dynamic-control-hz requires --return-action-chunk.")
+    if args.interpolation_substeps < 1:
+        raise ValueError("interpolation_substeps must be >= 1.")
+    if args.chunk_xyz_shift and not args.return_action_chunk:
+        raise ValueError("--chunk-xyz-shift requires --return-action-chunk.")
+    if args.boundary_blend and not args.return_action_chunk:
+        raise ValueError("--boundary-blend requires --return-action-chunk.")
+    if args.boundary_blend_steps < 1:
+        raise ValueError("boundary_blend_steps must be >= 1.")
+    if args.save_video_hz <= 0:
+        raise ValueError("save_video_hz must be > 0.")
+
+
+def _resolve_save_video_path(save_video: Optional[str]) -> Optional[Path]:
+    if save_video is None:
+        return None
+    if save_video == "__AUTO__" or str(save_video).strip() == "":
+        return default_save_video_path()
+    return Path(save_video).expanduser().resolve()
 
 
 def run(args: argparse.Namespace) -> None:
@@ -757,6 +1188,8 @@ def run(args: argparse.Namespace) -> None:
         resize_lshape=args.resize_lshape,
         return_action_chunk=args.return_action_chunk,
         open_loop_horizon=args.open_loop_horizon,
+        replan_cubes=args.replan_cubes,
+        merge_mode=args.merge_mode,
     )
 
     with contextlib.ExitStack() as stack:
@@ -796,6 +1229,12 @@ def run(args: argparse.Namespace) -> None:
         )
         stack.callback(visualizer.close)
 
+        video_path = _resolve_save_video_path(args.save_video)
+        recorder: Optional[EpisodeVideoRecorder] = None
+        if video_path is not None:
+            recorder = EpisodeVideoRecorder(video_path, hz=args.save_video_hz)
+            stack.callback(recorder.close)
+
         arm = PiperArmEEF(
             args.can_name,
             dry_run=args.dry_run,
@@ -823,7 +1262,26 @@ def run(args: argparse.Namespace) -> None:
             release_trigger_mm=args.gripper_release_trigger_mm,
             hold_mm=args.gripper_hold_mm,
         )
-        control_period = 1.0 / args.control_hz
+        pacer = ChunkControlPacer(args.control_hz, dynamic=args.dynamic_control_hz)
+        if args.dynamic_control_hz:
+            logger.info(
+                "dynamic-control-hz enabled: target cycle N/control_hz with "
+                "open-loop period = (N/hz - server_interact) / N"
+            )
+        if args.interpolation_substeps > 1:
+            logger.info(
+                "execution interpolation enabled: %d substeps per policy action "
+                "(send rate ≈ %.1f Hz)",
+                args.interpolation_substeps,
+                args.control_hz * args.interpolation_substeps,
+            )
+        if args.boundary_blend:
+            logger.info(
+                "boundary-blend enabled: ramp first %d actions of each new chunk "
+                "from last command toward the model chunk",
+                args.boundary_blend_steps,
+            )
+        previous_action: Optional[np.ndarray] = None
 
         for step in range(args.max_timesteps):
             start = time.monotonic()
@@ -835,6 +1293,45 @@ def run(args: argparse.Namespace) -> None:
             state = arm.read_state()
 
             action = policy.predict(head_rgb, wrist_rgb, state, args.prompt)
+            fetch = policy.pop_chunk_fetch()
+            if fetch is not None:
+                if recorder is not None:
+                    recorder.note_interact()
+                pacer.note_chunk_fetch(fetch[0], fetch[1])
+                if args.chunk_xyz_shift:
+                    # main.py translates the absolute chunk after blocking infer.
+                    state_after = arm.read_state()
+                    xyz_shift = (state_after[:3] - state[:3]).astype(np.float32)
+                    action = np.asarray(action, dtype=np.float32).copy()
+                    action[:3] += xyz_shift
+                    for pending in policy._pending:
+                        pending[:3] += xyz_shift
+                    state = state_after
+                    if args.log_actions:
+                        logger.info(
+                            "chunk xyz_shift=%s after server fetch",
+                            np.array2string(xyz_shift, precision=4),
+                        )
+                if args.boundary_blend and previous_action is not None:
+                    # Full chunk lives in policy._pending; action is pending[0].
+                    blended = boundary_blend_chunk(
+                        [np.asarray(a, dtype=np.float32).copy() for a in policy._pending],
+                        previous_action,
+                        blend_steps=args.boundary_blend_steps,
+                    )
+                    policy._pending = blended
+                    action = blended[0].copy()
+                    if args.log_actions:
+                        logger.info(
+                            "boundary-blend applied to first %d/%d chunk actions",
+                            min(args.boundary_blend_steps, len(blended)),
+                            len(blended),
+                        )
+            elif recorder is not None and not args.return_action_chunk:
+                # Step mode: every server predict is one interaction.
+                recorder.note_interact()
+            if recorder is not None:
+                recorder.maybe_write(head_rgb, wrist_rgb)
             action = gripper_hold.apply(action)
             if args.log_actions and step % 10 == 0:
                 logger.info(
@@ -844,11 +1341,22 @@ def run(args: argparse.Namespace) -> None:
                     np.array2string(action[:3], precision=3),
                     float(action[-1]),
                 )
-            arm.send_action(action)
-
-            elapsed = time.monotonic() - start
-            if elapsed < control_period:
-                time.sleep(control_period - elapsed)
+            if previous_action is None:
+                previous_action = np.asarray(state, dtype=np.float32).copy()
+            step_period = pacer.policy_step_period
+            if args.interpolation_substeps > 1:
+                send_action_interpolated(
+                    arm,
+                    previous_action,
+                    action,
+                    substeps=args.interpolation_substeps,
+                    step_period=step_period,
+                )
+                pacer.consume_policy_step()
+            else:
+                arm.send_action(action)
+                pacer.wait_after_step(start)
+            previous_action = np.asarray(action, dtype=np.float32).copy()
 
 
 def main(argv: Optional[list[str]] = None) -> None:

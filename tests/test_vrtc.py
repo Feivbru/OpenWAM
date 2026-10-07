@@ -109,6 +109,57 @@ def test_vrtc_sync_warmup_and_predict():
     ex.shutdown()
 
 
+def test_vrtc_executor_set_replan_cubes():
+    vrtc = VrtcConfig(enabled=True, fu_frames=4, num_frames=33, video_stride=4, replan_cubes=2)
+    ex = VrtcSyncExecutor(engine=_FakeEngine(action_dim=10), vrtc=vrtc)
+    updated = ex.set_replan_cubes(1)
+    assert updated.replan_cubes == 1
+    assert ex.vrtc.replan_cubes == 1
+    with pytest.raises(ValueError, match="replan_cubes"):
+        ex.set_replan_cubes(5)
+    ex.shutdown()
+
+
+def test_vrtc_merge_modes_average_and_blend():
+    from openwam.deploy.executors.vrtc_executor import Cube, _blend_cube_actions
+
+    old = np.zeros((4, 2), dtype=np.float32)
+    new = np.ones((4, 2), dtype=np.float32)
+    blended = _blend_cube_actions(old, new)
+    np.testing.assert_allclose(blended[0], 0.0)
+    np.testing.assert_allclose(blended[-1], 1.0)
+    np.testing.assert_allclose(blended[1], 1.0 / 3.0, rtol=1e-5)
+
+    vrtc = VrtcConfig(
+        enabled=True, fu_frames=4, num_frames=33, video_stride=4, replan_cubes=0, merge_mode="average"
+    )
+    ex = VrtcSyncExecutor(engine=_FakeEngine(action_dim=2), vrtc=vrtc)
+    ex.wait_pool = [
+        Cube(frame="o", actions=np.zeros((4, 2), dtype=np.float32), seq=10),
+    ]
+    kept = [Cube(frame="n", actions=np.ones((4, 2), dtype=np.float32), seq=10)]
+    merged = ex._merge_wait_cubes(kept)
+    np.testing.assert_allclose(merged[0].actions, 0.5)
+    ex.set_merge_mode("blend")
+    merged_b = ex._merge_wait_cubes(kept)
+    np.testing.assert_allclose(merged_b[0].actions[0], 0.0)
+    np.testing.assert_allclose(merged_b[0].actions[-1], 1.0)
+    with pytest.raises(ValueError, match="merge_mode"):
+        ex.set_merge_mode("nope")
+    ex.shutdown()
+
+
+def test_ping_replan_cubes_payload_helpers():
+    from openwam.deploy.server import PolicyServer
+
+    assert PolicyServer._ping_replan_cubes({"type": "ping"}) is None
+    assert PolicyServer._ping_replan_cubes({"type": "ping", "replan_cubes": 1}) == 1
+    assert PolicyServer._ping_replan_cubes({"type": "ping", "vrtc": {"replan_cubes": 0}}) == 0
+    assert PolicyServer._ping_merge_mode({"type": "ping"}) is None
+    assert PolicyServer._ping_merge_mode({"type": "ping", "merge_mode": "blend"}) == "blend"
+    assert PolicyServer._ping_merge_mode({"type": "ping", "vrtc": {"merge_mode": "average"}}) == "average"
+
+
 def test_vrtc_predict_action_chunk_one_cube():
     vrtc = VrtcConfig(enabled=True, fu_frames=4, num_frames=33, video_stride=4, replan_cubes=0)
     engine = _FakeEngine(action_dim=10)

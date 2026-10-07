@@ -37,6 +37,10 @@ Messages:
             server clears its buffer so the client owns open-loop execution.
     reset → {"type": "reset_ack"}
     ping  → {"type": "pong", ..., "return_action_chunk": bool}
+            Optional client fields (VRTC deploy only):
+              ``"replan_cubes": int`` / ``"merge_mode": "replace|average|blend"``
+              (also under ``"vrtc": {...}``) — applied for the rest of the
+              server process and echoed in ``pong["vrtc"]``.
     error → {"type": "error", "code": str, "message": "<what went wrong>"}
 
 Usage:
@@ -240,6 +244,67 @@ class PolicyServer:
         self._request_count = 0
         self._total_latency = 0.0
 
+    @staticmethod
+    def _ping_vrtc_field(data: dict, name: str):
+        """Extract an optional VRTC field from a ping payload (top-level or under vrtc)."""
+        if not isinstance(data, dict):
+            return None
+        if data.get(name) is not None:
+            return data[name]
+        vrtc = data.get("vrtc")
+        if isinstance(vrtc, dict) and vrtc.get(name) is not None:
+            return vrtc[name]
+        return None
+
+    @staticmethod
+    def _ping_replan_cubes(data: dict):
+        """Extract optional ``replan_cubes`` from a ping payload."""
+        value = PolicyServer._ping_vrtc_field(data, "replan_cubes")
+        return None if value is None else int(value)
+
+    @staticmethod
+    def _ping_merge_mode(data: dict):
+        """Extract optional ``merge_mode`` from a ping payload."""
+        value = PolicyServer._ping_vrtc_field(data, "merge_mode")
+        return None if value is None else str(value)
+
+    def _apply_replan_cubes(self, replan_cubes: int) -> None:
+        """Record a client-requested VRTC replan threshold on the live policy."""
+        from omegaconf import OmegaConf
+
+        self._init_policy()
+        self._policy.set_replan_cubes(int(replan_cubes))
+        OmegaConf.update(self.cfg, "vrtc.replan_cubes", int(replan_cubes), merge=False)
+
+    def _apply_merge_mode(self, merge_mode: str) -> None:
+        """Record a client-requested VRTC wait-pool merge mode on the live policy."""
+        from omegaconf import OmegaConf
+
+        self._init_policy()
+        self._policy.set_merge_mode(str(merge_mode))
+        OmegaConf.update(self.cfg, "vrtc.merge_mode", str(self._policy._vrtc.merge_mode), merge=False)
+
+    def _vrtc_pong_fields(self) -> dict:
+        """Live VRTC wire advert for PONG (prefers policy state over frozen cfg)."""
+        self._init_policy()
+        info = self._policy.vrtc_wire_info()
+        if info is not None:
+            return info
+        from openwam.vrtc import resolve_vrtc_config
+
+        vrtc = resolve_vrtc_config(self.cfg)
+        if not vrtc.enabled:
+            return {}
+        return {
+            "enabled": True,
+            "video_stride": int(vrtc.video_stride),
+            "cube_action_len": int(vrtc.video_stride),
+            "replan_cubes": int(vrtc.replan_cubes),
+            "merge_mode": str(vrtc.merge_mode),
+            "predict_cubes": int(vrtc.predict_cubes),
+            "pool_warmup_cubes": int(vrtc.pool_warmup_cubes),
+        }
+
     def shutdown(self):
         """Clean up async resources."""
         if self._policy is not None:
@@ -276,6 +341,12 @@ class PolicyServer:
                             result["type"] = ACTION
                             await websocket.send(json.dumps(result))
                         elif msg_type == PING:
+                            requested = self._ping_replan_cubes(data)
+                            if requested is not None:
+                                self._apply_replan_cubes(requested)
+                            merge_mode = self._ping_merge_mode(data)
+                            if merge_mode is not None:
+                                self._apply_merge_mode(merge_mode)
                             pong = {
                                 "type": PONG,
                                 **self._ckpt_contract(),
@@ -283,18 +354,9 @@ class PolicyServer:
                             }
                             # Advertise VRTC cube wire so clients can set open-loop = stride.
                             try:
-                                from openwam.vrtc import resolve_vrtc_config
-
-                                vrtc = resolve_vrtc_config(self.cfg)
-                                if vrtc.enabled:
-                                    pong["vrtc"] = {
-                                        "enabled": True,
-                                        "video_stride": int(vrtc.video_stride),
-                                        "cube_action_len": int(vrtc.video_stride),
-                                        "replan_cubes": int(vrtc.replan_cubes),
-                                        "predict_cubes": int(vrtc.predict_cubes),
-                                        "pool_warmup_cubes": int(vrtc.pool_warmup_cubes),
-                                    }
+                                vrtc_info = self._vrtc_pong_fields()
+                                if vrtc_info:
+                                    pong["vrtc"] = vrtc_info
                             except Exception:
                                 pass
                             await websocket.send(json.dumps(pong))

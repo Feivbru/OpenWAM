@@ -97,6 +97,18 @@ def test_ws_reset_and_ping(monkeypatch):
     assert client2.ping() == {"type": "pong"}
     assert json.loads(fake2.sent[0])["type"] == "ping"
 
+    client3, fake3 = _ws_client_with(
+        monkeypatch, json.dumps({"type": "pong", "vrtc": {"enabled": True, "replan_cubes": 1}})
+    )
+    assert client3.ping(replan_cubes=1)["vrtc"]["replan_cubes"] == 1
+    assert json.loads(fake3.sent[0]) == {"type": "ping", "replan_cubes": 1}
+
+    client4, fake4 = _ws_client_with(
+        monkeypatch, json.dumps({"type": "pong", "vrtc": {"enabled": True, "merge_mode": "blend"}})
+    )
+    assert client4.ping(merge_mode="blend")["vrtc"]["merge_mode"] == "blend"
+    assert json.loads(fake4.sent[0]) == {"type": "ping", "merge_mode": "blend"}
+
 
 def test_ws_error_status_mapping(monkeypatch):
     client, _ = _ws_client_with(monkeypatch, json.dumps({"type": "error", "code": "internal_error", "message": "x"}))

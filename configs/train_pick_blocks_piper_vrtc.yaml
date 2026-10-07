@@ -87,6 +87,8 @@ vrtc:
   condition_frames: 1
   # Deploy scheduler: prefetch when remaining wait cubes <= this (0 = sync-only).
   replan_cubes: 2
+  # Deploy wait-pool merge: replace | average | blend (client may override via ping).
+  merge_mode: replace
 
 project:
   name: pick_blocks_piper_vrtc

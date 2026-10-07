@@ -136,8 +136,23 @@ class WSPolicyClient:
             msg["slot_id"] = int(slot_id)
         return self._roundtrip(msg)
 
-    def ping(self) -> dict:
-        return self._roundtrip({"type": PING}, reconnect=False)
+    def ping(
+        self,
+        *,
+        replan_cubes: int | None = None,
+        merge_mode: str | None = None,
+    ) -> dict:
+        """Liveness / handshake probe.
+
+        Optional VRTC fields (``replan_cubes``, ``merge_mode``) are forwarded on
+        the ping payload so the server can record them for the session.
+        """
+        msg: dict = {"type": PING}
+        if replan_cubes is not None:
+            msg["replan_cubes"] = int(replan_cubes)
+        if merge_mode is not None:
+            msg["merge_mode"] = str(merge_mode)
+        return self._roundtrip(msg, reconnect=False)
 
     def close(self) -> None:
         if self._ws is not None:

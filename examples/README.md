@@ -55,6 +55,10 @@ bash scripts/deploy.sh /path/to/ckpt --port 8848 \
   --inference-horizon 16   # optional: replan every N actions instead of full chunk
 ```
 
+```bash
+bash scripts/deploy.sh /media/ubun/16T/ming/openwam/OpenWAM/real/piper_pick_blocks_vrtc/ --port 8857 --return-action-chunk vrtc.replan_cubes=1 
+```
+
 ### 2. Start the client
 
 ```bash
@@ -86,6 +90,55 @@ python examples/piper_eef_client.py \
   --max-timesteps 5 \
   --log-actions
 ```
+
+```bash
+sudo ip link set can0 down
+sudo ip link set can0 type can bitrate 1000000
+sudo ip link set can0 up
+ip -details link show can0
+
+python examples/piper_eef_client.py \
+  --host 127.0.0.1 --port 8857 \
+  --return-action-chunk \
+  --prompt 'pick up the block.' \
+  --can-name can0 \
+  --control-hz 30 \
+  --dynamic-control-hz \
+  --gripper-max-m 0.1 \
+  --camera-backend realsense \
+  --head-camera-serial 339322074804 \
+  --wrist-camera-serial 346522074547 \
+  --replan-cubes 2 \
+  --open-loop-horizon 4 \
+  --merge-mode blend \
+  --save-video \
+  --save-video-hz 5 \
+  --no-binarize-gripper 
+```
+
+`--replan-cubes N` / `--merge-mode {replace,average,blend}` are sent on the
+initial `ping`; a VRTC server records them and echoes `pong.vrtc.*`. Omit to
+keep the server / ckpt defaults (`merge_mode=replace` = hard overwrite).
+
+`--save-video [PATH]`: record head (top) + wrist (bottom) into one mp4; omit
+`PATH` → `runs/piper_eef_<timestamp>.mp4`. `--save-video-hz` (default 5)
+throttles wall-clock writes. Top-right overlay `interact N` is the 0-based
+open-loop chunk-fetch count (each new server chunk; step mode counts every
+server predict).
+
+`--dynamic-control-hz` (optional, needs `--return-action-chunk`): after each
+chunk fetch of `N` actions with server RTT `T`, pace open-loop so
+`T + N * step_period ≈ N / control_hz` — execution Hz is slightly above the
+nominal `--control-hz`. Default is fixed `1/control_hz` per step.
+
+`--interpolation-substeps N` (exec-side, from `infer/example/main.py`): blend
+previous→target EEF10 across N setpoints per policy action (`1`=off, try `4`).
+Optional `--chunk-xyz-shift` re-reads state after a chunk fetch and shifts
+pending chunk xyz (reduces jump after blocking infer).
+
+`--boundary-blend`: on each new chunk, ramp the first `--boundary-blend-steps`
+actions (default 4) from the last commanded pose toward the model chunk — helps
+the “dip then snap back up” cube-boundary retract.
 
 ### Notes
 
@@ -131,9 +184,11 @@ python examples/piper_eef_client.py \
   --host 127.0.0.1 --port 8857 \
   --camera-backend fake --dry-run \
   --return-action-chunk --open-loop-horizon 4 \
+  --replan-cubes 1 \
   --max-timesteps 40 \
   --prompt 'Pick up the red block and place it in the box.'
 ```
 
 Pong may include ``vrtc.cube_action_len`` (= ``video_stride``); keep client
-open-loop horizon equal to that.
+open-loop horizon equal to that. ``--replan-cubes`` overrides the server
+prefetch threshold via the initial ping.

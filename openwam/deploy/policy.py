@@ -59,12 +59,14 @@ class WAMPolicy:
             self._executor = vrtc_executor
             logger.info(
                 "WAMPolicy: VRTC cube-pool executor "
-                "(fu_frames=%d, warmup_cubes=%d, predict_cubes=%d, video_stride=%d, replan_cubes=%d)",
+                "(fu_frames=%d, warmup_cubes=%d, predict_cubes=%d, video_stride=%d, "
+                "replan_cubes=%d, merge_mode=%s)",
                 vrtc.fu_frames,
                 vrtc.pool_warmup_cubes,
                 vrtc.predict_cubes,
                 vrtc.video_stride,
                 vrtc.replan_cubes,
+                vrtc.merge_mode,
             )
         else:
             self._vrtc = resolve_vrtc_config(cfg)
@@ -126,6 +128,43 @@ class WAMPolicy:
     def reset(self):
         """Clear executor state between episodes."""
         self._executor.reset()
+
+    def set_replan_cubes(self, replan_cubes: int):
+        """Override VRTC ``replan_cubes`` at runtime (client ping handshake)."""
+        if self._vrtc is None or not self._vrtc.enabled:
+            raise ValueError("replan_cubes override requires vrtc.enabled=true")
+        if not hasattr(self._executor, "set_replan_cubes"):
+            raise ValueError(
+                f"Executor {type(self._executor).__name__} does not support set_replan_cubes"
+            )
+        self._vrtc = self._executor.set_replan_cubes(int(replan_cubes))
+        return self._vrtc
+
+    def set_merge_mode(self, merge_mode: str):
+        """Override VRTC wait-pool ``merge_mode`` at runtime (client ping handshake)."""
+        if self._vrtc is None or not self._vrtc.enabled:
+            raise ValueError("merge_mode override requires vrtc.enabled=true")
+        if not hasattr(self._executor, "set_merge_mode"):
+            raise ValueError(
+                f"Executor {type(self._executor).__name__} does not support set_merge_mode"
+            )
+        self._vrtc = self._executor.set_merge_mode(str(merge_mode))
+        return self._vrtc
+
+    def vrtc_wire_info(self) -> dict | None:
+        """VRTC fields advertised on PONG, or ``None`` when VRTC is disabled."""
+        vrtc = self._vrtc
+        if vrtc is None or not vrtc.enabled:
+            return None
+        return {
+            "enabled": True,
+            "video_stride": int(vrtc.video_stride),
+            "cube_action_len": int(vrtc.video_stride),
+            "replan_cubes": int(vrtc.replan_cubes),
+            "merge_mode": str(vrtc.merge_mode),
+            "predict_cubes": int(vrtc.predict_cubes),
+            "pool_warmup_cubes": int(vrtc.pool_warmup_cubes),
+        }
 
     def shutdown(self):
         """Release executor resources (background threads in async mode)."""
