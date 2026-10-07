@@ -234,9 +234,12 @@ class OpenWAMTrainer:
 
         debug = bool(getattr(t, "debug", False))
         if debug:
-            max_steps = 20
-            save_steps_override = 10
-            logger.info("DEBUG mode: max_steps=20, save@10, constant LR")
+            if max_steps is None:
+                max_steps = 20
+            else:
+                max_steps = min(int(max_steps), 20)
+            save_steps_override = min(10, int(max_steps))
+            logger.info("DEBUG mode: max_steps=%s, save@%s, constant LR", max_steps, save_steps_override)
 
         # num_epochs=null means step-only training: max_steps is the sole stop condition.
         if num_epochs is None and not max_steps:
@@ -364,6 +367,21 @@ class OpenWAMTrainer:
                     torch.manual_seed(step_seed)
                     if torch.cuda.is_available():
                         torch.cuda.manual_seed_all(step_seed)
+                if debug and global_step == 0 and torch.cuda.is_available():
+                    torch.cuda.reset_peak_memory_stats()
+                    was_training = self.architecture.training
+                    self.architecture.eval()
+                    with torch.no_grad():
+                        self.compute_loss(batch)
+                    logger.info(
+                        "[mem] infer_forward allocated=%.2fGiB reserved=%.2fGiB peak=%.2fGiB",
+                        torch.cuda.memory_allocated() / (1024**3),
+                        torch.cuda.memory_reserved() / (1024**3),
+                        torch.cuda.max_memory_allocated() / (1024**3),
+                    )
+                    if was_training:
+                        self.architecture.train()
+                    torch.cuda.reset_peak_memory_stats()
                 with self.accelerator.accumulate(self.architecture):
                     losses = self.compute_loss(batch)
                     loss = losses["total"]
@@ -401,9 +419,10 @@ class OpenWAMTrainer:
 
                 global_step += 1
 
-                if is_main and torch.cuda.is_available() and global_step % 10 == 0:
+                if is_main and torch.cuda.is_available() and (debug or global_step % 10 == 0):
                     alloc = torch.cuda.memory_allocated() / (1024**3)
                     reserved = torch.cuda.memory_reserved() / (1024**3)
+                    peak = torch.cuda.max_memory_allocated() / (1024**3)
                     avg_gib = 0.0
                     ipg_gib = 0.0
                     try:
@@ -425,11 +444,12 @@ class OpenWAMTrainer:
                     except Exception:
                         pass
                     logger.info(
-                        "[mem] step=%d allocated=%.2fGiB reserved=%.2fGiB "
+                        "[mem] step=%d allocated=%.2fGiB reserved=%.2fGiB peak=%.2fGiB "
                         "ds_avg_grads=%.2fGiB ds_ipg=%.2fGiB",
                         global_step,
                         alloc,
                         reserved,
+                        peak,
                         avg_gib,
                         ipg_gib,
                     )

@@ -127,6 +127,7 @@ def load_from_checkpoint_dir(
     ckpt_name: Optional[str] = None,
     *,
     skip_text_encoder: bool = False,
+    hydrate_text_encoder: bool = True,
 ) -> Tuple[DictConfig, BaseWAMArchitecture]:
     """Load full model from a self-contained checkpoint directory.
 
@@ -144,6 +145,9 @@ def load_from_checkpoint_dir(
             unified safetensors load. Also auto-enabled when the saved
             config has ``dataloader.use_t5_cache=true`` (those checkpoints
             omit ``video_backbone.text_encoder.*``).
+        hydrate_text_encoder: When ``skip_text_encoder`` is True, attach a
+            live UMT5 from ``model.video_backbone.model_path``. Set False for
+            batched deploy that uses a remote encoder_server (no local UMT5).
 
     Returns:
         ``(cfg, architecture)`` — the resolved config and architecture
@@ -299,8 +303,11 @@ def load_from_checkpoint_dir(
 
     # 4b. T5-cache / skip_text_encoder: restore live UMT5 for encode_text before
     # set_dtype_device so the hydrated module moves with the backbone.
-    if skip_text_encoder:
+    # Batched servers skip hydrate and encode via a remote encoder_server.
+    if skip_text_encoder and hydrate_text_encoder:
         _hydrate_wan_text_encoder(architecture, cfg, ckpt_dir)
+    elif skip_text_encoder:
+        logger.info("skip_text_encoder without hydrate: text embeds expected from remote encoder")
 
     # 5. Move to device and set eval mode — top-down: architecture → video_backbone → submodules.
     _mp = OmegaConf.select(cfg, "training.mixed_precision", default="bf16")

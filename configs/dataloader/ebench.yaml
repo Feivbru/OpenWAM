@@ -1,5 +1,5 @@
 type: ebench
-dataset_dir: /path/to/ebench_data
+dataset_dir: /data/zixian_guo/projects/haoming/project/PI/OpenWAM/assets/benchmark_data/ebench
 
 # Raw-23: L xyz/rot6d/gripper, R xyz/rot6d/gripper, base dx/dy/dyaw (degrees).
 # ee_pose uses wxyz quaternions; each hand's finger values are averaged.

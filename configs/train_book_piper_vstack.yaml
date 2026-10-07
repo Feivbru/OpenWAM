@@ -1,0 +1,94 @@
+# OpenWAM-α Foundation finetune on recognize-book Piper (native vstack vision).
+#
+# - Dataloader: book_piper_vstack (head above right-wrist, no resize, 960x640)
+# - Text: offline UMT5 cache (single instruction) → skip loading T5 weights
+# - Launch: bash scripts/train_book_piper_vstack.sh
+#
+# Canvas is ~5× the old L-shape 384x320 token count. batch_size starts at 1;
+# raise only after the GPU 2–7 smoke.
+
+defaults:
+  - model: dual_system
+  - dataloader: book_piper_vstack
+  - _self_
+
+training:
+  debug: false
+
+  learning_rate: 1.0e-5
+  adam_betas: [0.9, 0.95]
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  num_epochs: 2
+  max_steps: null
+  # Smoke 2026-10-06 GPU 2–7, ZeRO-2, 960x640, no grad checkpoint:
+  #   bs=1 infer peak ≈ 18.8 GiB (torch) / train peak ≈ 37.6 GiB; nvidia-smi ≈ 47–52 / 96 GiB
+  #   bs=8 OOM in DiT cross-attn (~90.5 GiB allocated, <80 MiB free)
+  # Full run: try bs=4 (global 24 on 6 GPUs).
+  batch_size: 4
+  gradient_accumulation_steps: 1
+
+  lr_scheduler: cosine
+  warmup_ratio: 0.05
+  lr_min_ratio: 0.01
+  action_lr: null
+  video_lr: null
+
+  mixed_precision: bf16
+  zero_stage: 2
+  offload_optimizer_device: none
+
+  use_gradient_checkpointing: false
+  use_gradient_checkpointing_offload: false
+  initialize_model_on_cpu: true
+
+  video_mode: train
+  lambda_video: 1.0
+  lambda_action: 1.0
+  lambda_distill: 0.0
+  use_distill_gate: false
+
+  max_timestep_boundary: 1.0
+  min_timestep_boundary: 0.0
+
+  output_path: outputs/book_piper_vstack_ft
+  save_steps: 2000
+  save_full_states_for_resume: false
+  keep_last_k_ckpts: 3
+
+  finetune_ckpt_path: assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Pretrain-Foundation-Model
+  resume_ckpt_path: null
+
+  dataset_num_workers: 4
+
+dataloader:
+  use_t5_cache: true
+  t5_cache_dirname: umt5_openwam
+  compose_mode: vstack
+  color_jitter:
+    enabled: true
+    brightness: 0.2
+    contrast: 0.2
+    saturation: 0.2
+    hue: 0.0
+
+model:
+  freeze_video_dit: false
+  architecture:
+    mot_checkpoint_mixed_attn: true
+  video_backbone:
+    model_path: /data/zixian_guo/projects/haoming/project/Motus/pretrained_models/Wan2.2-TI2V-5B
+
+fpd:
+  enabled: false
+
+project:
+  name: book_piper_vstack_ft
+  output_dir: outputs/book_piper_vstack_ft_${now:%Y%m%d_%H%M%S}
+  seed: 42
+  wandb:
+    project: openwam
+    run_name: book_piper_vstack_ft
+    entity: null
+    mode: online

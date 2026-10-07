@@ -1,0 +1,44 @@
+type: book_piper_vstack
+
+# LeRobot v2.1 recognize-book Piper: native dual-cam vertical stack (no resize).
+# top_head (480x640) above hand_right (480x640) → canvas 960x640.
+# Joint parquet+videos untouched; EEF10 under derived/eef/ (offline FK sidecar).
+dataset_dir: /data/zixian_guo/projects/haoming/project/PI/riri/data/recignize_book_name
+action_mode: eef
+gripper_convention: minus1_closed_plus1_open
+eef_dir: null  # default: <dataset_dir>/derived/eef
+split_manifest_path: null  # default: <dataset_dir>/splits/manifest.json
+
+# Normalize raw EEF10, then scatter to α left-arm slots 0:10.
+unify_action: true
+unify_action_map: ["0-9"]
+normalize_mode: min-max
+
+head_camera_priority:
+  - observation.images.top_head
+wrist_camera_priority:
+  - observation.images.hand_right
+
+num_frames: 33
+video_stride: 4
+window_stride: 1
+height: 960
+width: 640
+multiview: true
+compose_mode: vstack
+
+split: train
+enable_action_supervision: true
+
+# Offline UMT5 cache (single instruction). Trainer skips loading
+# text_encoder weights when true. Produce with:
+#   scripts/precompute_banana_piper_t5_embeds.py --dataset_dir <this dataset>
+use_t5_cache: true
+t5_cache_dirname: umt5_openwam
+
+color_jitter:
+  enabled: true
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.0

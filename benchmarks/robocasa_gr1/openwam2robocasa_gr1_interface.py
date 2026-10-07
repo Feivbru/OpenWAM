@@ -10,13 +10,33 @@ if _PROJECT_ROOT not in _sys.path:
     _sys.path.insert(0, _PROJECT_ROOT)
 
 import json  # noqa: E402
+from collections import deque  # noqa: E402
 from collections.abc import Mapping  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import numpy as np  # noqa: E402
 
 from benchmarks.utils import WSPolicyClient, client, resize_for_lshape_slot, transport  # noqa: E402
-from openwam.dataloader.utils.gr1_kinematics import EEF33_DIM, GR1Kinematics  # noqa: E402
+
+
+def _load_gr1_kinematics():
+    """Import GR1Kinematics without pulling openwam.dataloader package __init__
+    (which requires pandas and other train-only deps absent from robocasa-gr1)."""
+    import importlib.util
+
+    path = Path(_PROJECT_ROOT) / "openwam" / "dataloader" / "utils" / "gr1_kinematics.py"
+    mod_name = "openwam_gr1_kinematics_standalone"
+    spec = importlib.util.spec_from_file_location(mod_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load GR1 kinematics from {path}")
+    mod = importlib.util.module_from_spec(spec)
+    # dataclasses look up cls.__module__ in sys.modules during decoration
+    _sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    return mod.EEF33_DIM, mod.GR1Kinematics
+
+
+EEF33_DIM, GR1Kinematics = _load_gr1_kinematics()
 
 
 def _as_vector(value) -> np.ndarray:
@@ -52,6 +72,8 @@ class OpenWAMRoboCasaGR1Policy:
         fallback_prompt_key: str = "annotation.human.action.task_description",
         send_state: bool = True,
         state_dim: int | None = None,
+        project_discrete_hands: bool = False,
+        n_action_steps: int | None = None,
         debug: bool = False,
         debug_dir: str = "./debug_robocasa_gr1",
     ) -> None:
@@ -70,11 +92,22 @@ class OpenWAMRoboCasaGR1Policy:
         self._fallback_prompt_key = fallback_prompt_key
         self._send_state = send_state
         self._state_dim = state_dim
+        self._project_discrete_hands = bool(project_discrete_hands)
+        if n_action_steps is not None and int(n_action_steps) < 1:
+            raise ValueError(f"n_action_steps must be >= 1 or None, got {n_action_steps!r}")
+        self._n_action_steps = None if n_action_steps is None else int(n_action_steps)
         self._debug = debug
         self._debug_dir = Path(debug_dir)
         self._episode = -1
         self._step = 0
         self._ik_failures = 0
+        self._pending: deque[np.ndarray] = deque()
+        raw_slot = (
+            _os.environ.get("ROBOCASA_GR1_SLOT", "").strip()
+            or _os.environ.get("ROBOTWIN_SLOT", "").strip()
+            or _os.environ.get("LIBERO_SLOT", "").strip()
+        )
+        self._slot_id = int(raw_slot) if raw_slot else None
         if debug:
             self._debug_dir.mkdir(parents=True, exist_ok=True)
 
@@ -91,7 +124,9 @@ class OpenWAMRoboCasaGR1Policy:
         }
         print(
             f"[OpenWAMRoboCasaGR1Policy] server={self._ws_url} send_state={send_state} "
-            f"state_dim={state_dim} action_dims={action_dims}"
+            f"state_dim={state_dim} project_discrete_hands={self._project_discrete_hands} "
+            f"n_action_steps={self._n_action_steps} "
+            f"action_dims={action_dims} slot_id={self._slot_id}"
         )
 
     def close(self) -> None:
@@ -101,14 +136,18 @@ class OpenWAMRoboCasaGR1Policy:
         self._episode += 1
         self._step = 0
         self._ik_failures = 0
+        self._pending.clear()
         # RoboCasa rebuilds its MuJoCo simulation on reset; discard stale
         # MjModel/MjData handles before computing the next episode's FK/IK.
         self._kinematics = GR1Kinematics.from_env(self._env)
-        ack = self._client.reset()
+        ack = self._client.reset(slot_id=self._slot_id)
         if ack.get("type") != transport.RESET_ACK:
             raise RuntimeError(f"OpenWAM server reset returned unexpected response: {ack}")
 
     def act(self, obs: Mapping) -> dict:
+        if self._pending:
+            return self._execute_eef33(self._pending.popleft(), obs)
+
         state = self._kinematics.observation_to_eef33(obs).tolist() if self._send_state else None
         if self._state_dim is not None and state is not None and len(state) != self._state_dim:
             raise ValueError(f"RoboCasa state dim {len(state)} != expected {self._state_dim}")
@@ -122,11 +161,30 @@ class OpenWAMRoboCasaGR1Policy:
             prompt=prompt,
             state=state,
         )
+        if self._slot_id is not None:
+            payload["slot_id"] = int(self._slot_id)
         response = self._client.predict(payload)
-        raw_action = _as_vector(response["action"])
-        if raw_action.shape != (EEF33_DIM,):
-            raise ValueError(f"OpenWAM GR1 server must return EEF33 after deploy gather, got {raw_action.shape}")
-        action, ik = self._kinematics.eef33_to_action_dict(raw_action)
+        raw_chunk = response.get("actions") or [response["action"]]
+        if not raw_chunk:
+            raise RuntimeError("OpenWAM GR1 server returned an empty action chunk")
+        if self._n_action_steps is not None:
+            raw_chunk = list(raw_chunk)[: self._n_action_steps]
+            if not raw_chunk:
+                raise RuntimeError("OpenWAM GR1 n_action_steps truncated the action chunk to empty")
+        for raw in raw_chunk:
+            vec = _as_vector(raw)
+            if vec.shape != (EEF33_DIM,):
+                raise ValueError(
+                    f"OpenWAM GR1 server must return EEF33 after deploy gather, got {vec.shape}"
+                )
+            self._pending.append(vec)
+        return self._execute_eef33(self._pending.popleft(), obs, payload=payload)
+
+    def _execute_eef33(self, raw_action: np.ndarray, obs: Mapping, payload: dict | None = None) -> dict:
+        action, ik = self._kinematics.eef33_to_action_dict(
+            raw_action,
+            project_discrete_hands=self._project_discrete_hands,
+        )
         if not ik.converged:
             self._ik_failures += 1
             if self._ik_failures == 1 or self._ik_failures % 50 == 0:
@@ -135,7 +193,8 @@ class OpenWAMRoboCasaGR1Policy:
                     f"(step={self._step}, pos_err={ik.position_error:.4f}, rot_err={ik.rotation_error:.4f}); "
                     "holding current arm pose"
                 )
-        self._maybe_debug(obs, payload, raw_action, action, ik=ik)
+        if payload is not None:
+            self._maybe_debug(obs, payload, raw_action, action, ik=ik)
         self._step += 1
         return action
 

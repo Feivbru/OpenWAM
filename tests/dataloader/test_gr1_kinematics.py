@@ -102,3 +102,46 @@ def test_ik_failure_holds_current_arms_and_preserves_hand_waist(monkeypatch):
     np.testing.assert_array_equal(action["action.left_hand"], target[9:15])
     np.testing.assert_array_equal(action["action.right_hand"], target[24:30])
     np.testing.assert_array_equal(action["action.waist"], target[30:33])
+
+
+def test_project_fourier_hand_commands_snaps_to_demo_levels():
+    from openwam.dataloader.utils.gr1_kinematics import project_eef33_hand_commands
+
+    raw = np.zeros(EEF33_DIM, dtype=np.float32)
+    raw[:9] = np.linspace(0.1, 0.9, 9)
+    raw[15:24] = np.linspace(1.1, 1.9, 9)
+    raw[30:33] = [0.4, 0.5, 0.6]
+    raw[9:15] = [1.4, -0.1, 0.8, -1.4, 2.0, 1.0]
+    raw[24:30] = [-0.1, -0.1, 1.4, -1.4, -1.0, 2.0]
+    snapped = project_eef33_hand_commands(raw)
+    np.testing.assert_array_equal(snapped[:9], raw[:9])
+    np.testing.assert_array_equal(snapped[15:24], raw[15:24])
+    np.testing.assert_array_equal(snapped[30:33], raw[30:33])
+    np.testing.assert_allclose(snapped[9:15], [1.5, 0.0, 1.5, -1.5, 3.0, 0.0])
+    np.testing.assert_allclose(snapped[24:30], [-1.5, -1.5, 1.5, -1.5, -3.0, 3.0])
+
+
+def test_eef33_to_action_dict_projects_hands_when_enabled(monkeypatch):
+    kin = object.__new__(GR1Kinematics)
+    kin.data = SimpleNamespace(qpos=np.zeros(17, dtype=np.float64))
+    kin.qpos_index = {
+        "left_arm": np.arange(0, 7),
+        "right_arm": np.arange(7, 14),
+        "waist": np.arange(14, 17),
+    }
+    ok = IKSolution(
+        left_arm=np.ones(7, dtype=np.float32),
+        right_arm=np.full(7, 2.0, dtype=np.float32),
+        position_error=0.0,
+        rotation_error=0.0,
+        converged=True,
+    )
+    monkeypatch.setattr(kin, "solve_eef33", lambda target, **kwargs: ok)
+    target = np.zeros(EEF33_DIM, dtype=np.float32)
+    target[9:15] = [1.4, -0.1, 0.8, -1.4, 2.0, 1.0]
+    target[24:30] = [-0.1, -0.1, 1.4, -1.4, -1.0, 2.0]
+    continuous, _ = kin.eef33_to_action_dict(target, project_discrete_hands=False)
+    np.testing.assert_array_equal(continuous["action.left_hand"], target[9:15])
+    snapped, _ = kin.eef33_to_action_dict(target, project_discrete_hands=True)
+    np.testing.assert_allclose(snapped["action.left_hand"], [1.5, 0.0, 1.5, -1.5, 3.0, 0.0])
+    np.testing.assert_allclose(snapped["action.right_hand"], [-1.5, -1.5, 1.5, -1.5, -3.0, 3.0])

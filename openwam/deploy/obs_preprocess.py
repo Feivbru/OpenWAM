@@ -73,8 +73,10 @@ class ObsPreprocessor:
 
     - ``multiview=False``: use ``head_camera`` only, ``crop_and_resize`` to (W, H);
       wrist fields are ignored.
-    - ``multiview=True``: black-fill missing/None wrists, then compose the L-shape
-      layout keyed by ``camera_layout``.
+    - ``multiview=True`` + ``compose_mode=lshape`` (default): black-fill missing
+      wrists, then compose the L-shape layout keyed by ``camera_layout``.
+    - ``compose_mode=vstack``: native vertical stack of ``head_camera`` over
+      ``right_wrist_camera`` with no resize (left wrist ignored).
     """
 
     def __init__(
@@ -85,12 +87,14 @@ class ObsPreprocessor:
         img_height: int,
         img_width: int,
         requires_proprio: bool = False,
+        compose_mode: str = "lshape",
     ):
         self.multiview = bool(multiview)
         self.camera_layout = list(camera_layout)
         self.img_height = int(img_height)
         self.img_width = int(img_width)
         self.requires_proprio = bool(requires_proprio)
+        self.compose_mode = str(compose_mode or "lshape").strip().lower()
 
     @classmethod
     def from_cfg(cls, cfg, engine=None) -> "ObsPreprocessor":
@@ -109,12 +113,16 @@ class ObsPreprocessor:
             _h = getattr(dl, "height", 384)
         if _w is None and dl is not None:
             _w = getattr(dl, "width", 320)
+        compose_mode = "lshape"
+        if dl is not None:
+            compose_mode = str(getattr(dl, "compose_mode", "lshape") or "lshape")
         return cls(
             multiview=multiview,
             camera_layout=camera_layout,
             img_height=int(_h if _h is not None else 384),
             img_width=int(_w if _w is not None else 320),
             requires_proprio=_resolve_requires_proprio(cfg, engine),
+            compose_mode=compose_mode,
         )
 
     def preprocess(self, obs: dict) -> dict:
@@ -131,6 +139,7 @@ class ObsPreprocessor:
 
         from openwam.dataloader.transforms.multiview import (
             assemble_multiview_layout,
+            assemble_vstack_native,
             crop_and_resize,
         )
 
@@ -170,7 +179,23 @@ class ObsPreprocessor:
         head_pil = _as_pil(head_raw, ctx="images['head_camera']")
 
         # --- Dispatch by server's configured view mode ---
-        if not self.multiview:
+        if self.compose_mode == "vstack":
+            if imgs.get("left_wrist_camera") is not None:
+                logger.info("[obs] vstack mode; ignoring left_wrist_camera.")
+            right_raw = imgs.get("right_wrist_camera")
+            right_pil = None if right_raw is None else _as_pil(right_raw, ctx="images['right_wrist_camera']")
+            stacked = assemble_vstack_native(
+                head_pil,
+                right_pil,
+                fallback_size=(head_pil.size[0], head_pil.size[1]),
+            )
+            sw, sh = stacked.size
+            if (sh, sw) != (self.img_height, self.img_width):
+                raise ObsValidationError(
+                    f"vstack canvas {sh}x{sw} != configured {self.img_height}x{self.img_width}"
+                )
+            obs["image"] = stacked
+        elif not self.multiview:
             if imgs.get("left_wrist_camera") is not None or imgs.get("right_wrist_camera") is not None:
                 logger.info("[obs] single-view mode; ignoring wrist camera inputs.")
             obs["image"] = crop_and_resize(head_pil, self.img_height, self.img_width)
